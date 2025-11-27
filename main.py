@@ -83,13 +83,19 @@ class TradingApp:
         ttk.Label(price_frame, text="Gold Price (XAUUSDm):", font=("Arial", 16, "bold")).pack(side=tk.LEFT, padx=5)
         self.price_label = ttk.Label(price_frame, text="N/A", font=("Arial", 16, "bold"), foreground="#FFD700"); self.price_label.pack(side=tk.LEFT)
 
-        manual_frame = ttk.LabelFrame(main_frame, text="Risk Management (for all trades)", padding="10"); manual_frame.pack(fill=tk.X, pady=10)
+        manual_frame = ttk.LabelFrame(main_frame, text="Risk Management", padding="10"); manual_frame.pack(fill=tk.X, pady=10)
+        
         ttk.Label(manual_frame, text="Take Profit ($):").grid(row=0, column=0, padx=5, pady=5)
         self.tp_entry = ttk.Entry(manual_frame, width=10); self.tp_entry.grid(row=0, column=1, padx=5, pady=5); self.tp_entry.insert(0, "3.0")
+        
         ttk.Label(manual_frame, text="Stop Loss ($):").grid(row=1, column=0, padx=5, pady=5)
         self.sl_entry = ttk.Entry(manual_frame, width=10); self.sl_entry.grid(row=1, column=1, padx=5, pady=5); self.sl_entry.insert(0, "2.0")
-        buy_button = ttk.Button(manual_frame, text="Manual Buy", command=self.buy, style="Green.TButton"); buy_button.grid(row=0, column=2, padx=20, pady=5)
-        sell_button = ttk.Button(manual_frame, text="Manual Sell", command=self.sell, style="Red.TButton"); sell_button.grid(row=1, column=2, padx=20, pady=5)
+
+        ttk.Label(manual_frame, text="Max Positions:").grid(row=0, column=2, padx=(20, 5), pady=5)
+        self.max_pos_entry = ttk.Entry(manual_frame, width=10); self.max_pos_entry.grid(row=0, column=3, padx=5, pady=5); self.max_pos_entry.insert(0, "5")
+
+        buy_button = ttk.Button(manual_frame, text="Manual Buy", command=self.buy, style="Green.TButton"); buy_button.grid(row=1, column=2, padx=(20, 5), pady=5)
+        sell_button = ttk.Button(manual_frame, text="Manual Sell", command=self.sell, style="Red.TButton"); sell_button.grid(row=1, column=3, padx=5, pady=5)
 
         strategy_frame = ttk.LabelFrame(main_frame, text="Strategy Settings", padding="10"); strategy_frame.pack(fill=tk.X, pady=10)
         strategy_frame.columnconfigure(2, weight=1)
@@ -120,13 +126,15 @@ class TradingApp:
         closed_tab = ttk.Frame(notebook, style="Main.TFrame"); notebook.add(closed_tab, text="Trade History")
 
         # Open Positions Tree
-        self.open_positions_tree = ttk.Treeview(open_tab, columns=("Ticket", "Type", "Price", "TP", "SL"), displaycolumns=("Type", "Price", "TP", "SL"), show="headings")
-        self.open_positions_tree.heading("Type", text="Type"); self.open_positions_tree.heading("Price", text="Price"); self.open_positions_tree.heading("TP", text="Take Profit"); self.open_positions_tree.heading("SL", text="Stop Loss")
+        self.open_positions_tree = ttk.Treeview(open_tab, columns=("Ticket", "Type", "Price", "TP", "SL", "P/L"), displaycolumns=("Type", "Price", "TP", "SL", "P/L"), show="headings")
+        self.open_positions_tree.heading("Type", text="Type"); self.open_positions_tree.heading("Price", text="Price"); self.open_positions_tree.heading("TP", text="Take Profit"); self.open_positions_tree.heading("SL", text="Stop Loss"); self.open_positions_tree.heading("P/L", text="P/L ($)")
         self.open_positions_tree.pack(fill=tk.BOTH, expand=True)
+        self.open_positions_tree.tag_configure('profit', foreground='lightgreen')
+        self.open_positions_tree.tag_configure('loss', foreground='salmon')
 
         # Closed Trades Tree
-        self.closed_trades_tree = ttk.Treeview(closed_tab, columns=("Ticket", "Type", "Price", "TP", "SL", "Status"), displaycolumns=("Type", "Price", "TP", "SL", "Status"), show="headings")
-        self.closed_trades_tree.heading("Type", text="Type"); self.closed_trades_tree.heading("Price", text="Price"); self.closed_trades_tree.heading("TP", text="Take Profit"); self.closed_trades_tree.heading("SL", text="Stop Loss"); self.closed_trades_tree.heading("Status", text="Status")
+        self.closed_trades_tree = ttk.Treeview(closed_tab, columns=("Ticket", "Type", "Price", "TP", "SL", "P/L", "Status"), displaycolumns=("Type", "Price", "TP", "SL", "P/L", "Status"), show="headings")
+        self.closed_trades_tree.heading("Type", text="Type"); self.closed_trades_tree.heading("Price", text="Price"); self.closed_trades_tree.heading("TP", text="Take Profit"); self.closed_trades_tree.heading("SL", text="Stop Loss"); self.closed_trades_tree.heading("P/L", text="P/L ($)"); self.closed_trades_tree.heading("Status", text="Status")
         self.closed_trades_tree.pack(fill=tk.BOTH, expand=True)
         
         self.update_ui_for_strategy()
@@ -134,8 +142,7 @@ class TradingApp:
     def update_ui_for_strategy(self, event=None):
         strategy = self.strategy_combo.get()
         if strategy == "Gold M5 Scalper":
-            self.timeframe_combo.set("5 Minutes (M5)")
-            self.timeframe_combo.config(state="disabled")
+            self.timeframe_combo.set("5 Minutes (M5)"); self.timeframe_combo.config(state="disabled")
             self.param1_label.config(state="disabled"); self.param1_entry.config(state="disabled")
             self.param2_label.config(state="disabled"); self.param2_entry.config(state="disabled")
             self.param3_label.config(state="normal"); self.param3_entry.config(state="normal")
@@ -144,12 +151,8 @@ class TradingApp:
             self.param1_label.config(state="normal"); self.param1_entry.config(state="normal")
             self.param2_label.config(state="normal"); self.param2_entry.config(state="normal")
             self.param3_label.config(state="disabled"); self.param3_entry.config(state="disabled")
-            if strategy == "MA Crossover":
-                self.param1_label.config(text="Short MA Period:")
-                self.param2_label.config(text="Long MA Period:")
-            elif strategy == "Trend Following":
-                self.param1_label.config(text="Signal MA Period:")
-                self.param2_label.config(text="Trend MA Period:")
+            if strategy == "MA Crossover": self.param1_label.config(text="Short MA Period:"); self.param2_label.config(text="Long MA Period:")
+            elif strategy == "Trend Following": self.param1_label.config(text="Signal MA Period:"); self.param2_label.config(text="Trend MA Period:")
 
     def start_mt5(self):
         def connect():
@@ -166,17 +169,29 @@ class TradingApp:
         while True:
             try:
                 open_positions = mt5.positions_get(magic=234000)
-                server_open_tickets = {pos.ticket for pos in open_positions} if open_positions else set()
+                server_positions = {pos.ticket: pos for pos in open_positions} if open_positions else {}
+                server_tickets = set(server_positions.keys())
                 
                 gui_open_tickets = set(int(item_id) for item_id in self.open_positions_tree.get_children())
                 
-                closed_tickets = gui_open_tickets - server_open_tickets
-                
-                if closed_tickets:
-                    self.root.after(0, self.move_trades_to_history, closed_tickets)
-            except Exception as e:
-                print(f"Error in history sync: {e}")
-            time.sleep(15)
+                closed_tickets = gui_open_tickets - server_tickets
+                still_open_tickets = gui_open_tickets.intersection(server_tickets)
+
+                if closed_tickets: self.root.after(0, self.move_trades_to_history, closed_tickets)
+                if still_open_tickets: self.root.after(0, self.update_open_positions_pl, still_open_tickets, server_positions)
+
+            except Exception as e: print(f"Error in history sync: {e}")
+            time.sleep(3)
+
+    def update_open_positions_pl(self, tickets, server_positions):
+        for ticket in tickets:
+            try:
+                profit = server_positions[ticket].profit
+                pl_str = f"{profit:+.2f}"
+                tag = 'profit' if profit >= 0 else 'loss'
+                self.open_positions_tree.set(ticket, "P/L", pl_str)
+                self.open_positions_tree.item(ticket, tags=(tag,))
+            except Exception as e: print(f"Error updating P/L for ticket {ticket}: {e}")
 
     def move_trades_to_history(self, ticket_ids):
         for ticket in ticket_ids:
@@ -184,13 +199,15 @@ class TradingApp:
                 item_values = self.open_positions_tree.item(ticket, 'values')
                 if not item_values: continue
                 
-                # Values from open_positions_tree: (Ticket, Type, Price, TP, SL)
+                deals = mt5.history_deals_get(position=ticket)
+                final_pl = sum(d.profit for d in deals) if deals else 0.0
+                
+                # Values from open_positions_tree: (Ticket, Type, Price, TP, SL, P/L)
                 # We need to add "Closed" for the closed_trades_tree
-                closed_values = item_values + ("Closed",)
+                closed_values = item_values[:-1] + (f"{final_pl:+.2f}", "Closed")
                 self.closed_trades_tree.insert("", "end", values=closed_values)
                 self.open_positions_tree.delete(ticket)
-            except Exception as e:
-                print(f"Error moving trade {ticket} to history: {e}")
+            except Exception as e: print(f"Error moving trade {ticket} to history: {e}")
 
     def update_status(self, text, color): self.status_label.config(text=text, foreground=color)
     def update_price(self):
@@ -198,8 +215,7 @@ class TradingApp:
             symbol = "XAUUSDm"
             while True:
                 tick = mt5.symbol_info_tick(symbol)
-                if tick:
-                    self.root.after(0, self.price_label.config, {"text": f"${tick.ask}"})
+                if tick: self.root.after(0, self.price_label.config, {"text": f"${tick.ask}"})
                 time.sleep(1)
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -211,19 +227,13 @@ class TradingApp:
                 param1 = int(self.param1_entry.get()) if self.param1_entry.cget('state') != 'disabled' else None
                 param2 = int(self.param2_entry.get()) if self.param2_entry.cget('state') != 'disabled' else None
                 param3 = int(self.param3_entry.get()) if self.param3_entry.cget('state') != 'disabled' else None
-
-                if strategy != "Gold M5 Scalper" and param1 >= param2:
-                    messagebox.showerror("Error", "First MA period must be less than second MA period.")
-                    return
-                
+                if strategy != "Gold M5 Scalper" and param1 >= param2: messagebox.showerror("Error", "First MA period must be less than second MA period."); return
                 self.autotrade_enabled = True
                 self.autotrade_button.config(text="Stop Auto Trading", style="Red.TButton")
                 self.update_status(f"Auto Trading Started: {strategy} on {self.timeframe_combo.get()}", "cyan")
-                
                 self.strategy_thread = threading.Thread(target=self.run_strategy_loop, args=(strategy, timeframe, param1, param2, param3), daemon=True)
                 self.strategy_thread.start()
-            except (ValueError, TypeError):
-                messagebox.showerror("Error", "Invalid parameter. Please enter valid integers.")
+            except (ValueError, TypeError): messagebox.showerror("Error", "Invalid parameter. Please enter valid integers.")
         else:
             self.autotrade_enabled = False
             self.autotrade_button.config(text="Start Auto Trading", style="Green.TButton")
@@ -239,106 +249,56 @@ class TradingApp:
                 elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
                 elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3)
                 time.sleep(sleep_duration)
-            except Exception as e:
-                print(f"Error in strategy loop: {e}")
-                self.root.after(0, self.update_status, f"Strategy Error: {e}", "red")
-                time.sleep(30)
+            except Exception as e: print(f"Error in strategy loop: {e}"); self.root.after(0, self.update_status, f"Strategy Error: {e}", "red"); time.sleep(30)
 
     def run_gold_scalper_logic(self, strategy, symbol, max_spread):
-        # Time Filter
         server_time = datetime.now(timezone.utc)
-        if not (13 <= server_time.hour < 17):
-            self.root.after(0, self.update_status, "Scalper: Outside trading hours (13:00-17:00 UTC). Waiting...", "orange")
-            return
-        
-        # Spread Filter
+        if not (13 <= server_time.hour < 17): self.root.after(0, self.update_status, "Scalper: Outside trading hours (13:00-17:00 UTC). Waiting...", "orange"); return
         symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info:
-            self.root.after(0, self.update_status, "Scalper: Could not get symbol info.", "red")
-            return
+        if not symbol_info: self.root.after(0, self.update_status, "Scalper: Could not get symbol info.", "red"); return
         spread = symbol_info.spread
-        if spread > max_spread:
-            self.root.after(0, self.update_status, f"Scalper: Spread too high ({spread} > {max_spread}). Waiting...", "orange")
-            return
-
-        # Indicator Logic
+        if spread > max_spread: self.root.after(0, self.update_status, f"Scalper: Spread too high ({spread} > {max_spread}). Waiting...", "orange"); return
         rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
-        if rates is None or len(rates) < 22:
-            self.root.after(0, self.update_status, "Scalper: Not enough data for indicators. Waiting...", "orange")
-            return
-        
+        if rates is None or len(rates) < 22: self.root.after(0, self.update_status, "Scalper: Not enough data for indicators. Waiting...", "orange"); return
         close_prices = np.array([r['close'] for r in rates])
         rsi_values = calculate_rsi(close_prices, 14)
         if rsi_values is None or len(rsi_values) < 2: return
-        
         current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
         current_price = close_prices[-1]
         ema21 = calculate_ema(close_prices, 21)
-
         self.root.after(0, self.update_status, f"Scalper: Price={current_price:.2f}, EMA21={ema21:.2f}, RSI={current_rsi:.2f}", "cyan")
-
-        # Buy Signal
         if current_price > ema21 and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
-            self.root.after(0, self.update_status, "Gold Scalper: Buy signal!", "green")
-            self.root.after(0, self.execute_trade, "Buy", is_auto=True)
-            self.last_trade_action = "Buy"
-        # Sell Signal
+            self.root.after(0, self.update_status, "Gold Scalper: Buy signal!", "green"); self.root.after(0, self.execute_trade, "Buy", is_auto=True); self.last_trade_action = "Buy"
         elif current_price < ema21 and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
-            self.root.after(0, self.update_status, "Gold Scalper: Sell signal!", "red")
-            self.root.after(0, self.execute_trade, "Sell", is_auto=True)
-            self.last_trade_action = "Sell"
+            self.root.after(0, self.update_status, "Gold Scalper: Sell signal!", "red"); self.root.after(0, self.execute_trade, "Sell", is_auto=True); self.last_trade_action = "Sell"
 
     def run_ma_crossover_logic(self, strategy, symbol, timeframe, short_period, long_period):
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, long_period + 5)
-        if rates is None or len(rates) < long_period:
-            self.root.after(0, self.update_status, f"Not enough data for MA({long_period}). Waiting...", "orange")
-            return
-        
+        if rates is None or len(rates) < long_period: self.root.after(0, self.update_status, f"Not enough data for MA({long_period}). Waiting...", "orange"); return
         close = np.array([rate['close'] for rate in rates])
-        short_ma = np.mean(close[-short_period:])
-        long_ma = np.mean(close[-long_period:])
-        prev_short_ma = np.mean(close[-short_period-1:-1])
-        prev_long_ma = np.mean(close[-long_period-1:-1])
-
+        short_ma = np.mean(close[-short_period:]); long_ma = np.mean(close[-long_period:])
+        prev_short_ma = np.mean(close[-short_period-1:-1]); prev_long_ma = np.mean(close[-long_period-1:-1])
         self.root.after(0, self.update_status, f"Checking {strategy}: Short MA={short_ma:.2f}, Long MA={long_ma:.2f}", "cyan")
-
         if prev_short_ma < prev_long_ma and short_ma > long_ma and self.last_trade_action != "Buy":
-            self.root.after(0, self.update_status, "MA Crossover: Buy signal!", "green")
-            self.root.after(0, self.execute_trade, "Buy", is_auto=True)
-            self.last_trade_action = "Buy"
+            self.root.after(0, self.update_status, "MA Crossover: Buy signal!", "green"); self.root.after(0, self.execute_trade, "Buy", is_auto=True); self.last_trade_action = "Buy"
         elif prev_short_ma > prev_long_ma and short_ma < long_ma and self.last_trade_action != "Sell":
-            self.root.after(0, self.update_status, "MA Crossover: Sell signal!", "red")
-            self.root.after(0, self.execute_trade, "Sell", is_auto=True)
-            self.last_trade_action = "Sell"
+            self.root.after(0, self.update_status, "MA Crossover: Sell signal!", "red"); self.root.after(0, self.execute_trade, "Sell", is_auto=True); self.last_trade_action = "Sell"
 
     def run_trend_following_logic(self, strategy, symbol, timeframe, signal_period, trend_period):
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, trend_period + 5)
-        if rates is None or len(rates) < trend_period:
-            self.root.after(0, self.update_status, f"Not enough data for MA({trend_period}). Waiting...", "orange")
-            return
-
+        if rates is None or len(rates) < trend_period: self.root.after(0, self.update_status, f"Not enough data for MA({trend_period}). Waiting...", "orange"); return
         close = np.array([rate['close'] for rate in rates])
-        signal_ma = np.mean(close[-signal_period:])
-        trend_ma = np.mean(close[-trend_period:])
-        
-        prev_close = close[-2]
-        curr_close = close[-1]
+        signal_ma = np.mean(close[-signal_period:]); trend_ma = np.mean(close[-trend_period:])
+        prev_close = close[-2]; curr_close = close[-1]
         prev_signal_ma = np.mean(close[-signal_period-1:-1])
-
         self.root.after(0, self.update_status, f"Checking {strategy}: Price={curr_close:.2f}, Trend MA={trend_ma:.2f}", "cyan")
-
         is_uptrend = curr_close > trend_ma
         if is_uptrend and self.last_trade_action != "Buy":
-            if prev_close < prev_signal_ma and curr_close > signal_ma: # Price crosses above signal MA
-                self.root.after(0, self.update_status, "Trend Following: Buy signal!", "green")
-                self.root.after(0, self.execute_trade, "Buy", is_auto=True)
-                self.last_trade_action = "Buy"
-        
+            if prev_close < prev_signal_ma and curr_close > signal_ma:
+                self.root.after(0, self.update_status, "Trend Following: Buy signal!", "green"); self.root.after(0, self.execute_trade, "Buy", is_auto=True); self.last_trade_action = "Buy"
         elif not is_uptrend and self.last_trade_action != "Sell":
-            if prev_close > prev_signal_ma and curr_close < signal_ma: # Price crosses below signal MA
-                self.root.after(0, self.update_status, "Trend Following: Sell signal!", "red")
-                self.root.after(0, self.execute_trade, "Sell", is_auto=True)
-                self.last_trade_action = "Sell"
+            if prev_close > prev_signal_ma and curr_close < signal_ma:
+                self.root.after(0, self.update_status, "Trend Following: Sell signal!", "red"); self.root.after(0, self.execute_trade, "Sell", is_auto=True); self.last_trade_action = "Sell"
 
     def buy(self): self.execute_trade("Buy")
     def sell(self): self.execute_trade("Sell")
@@ -375,10 +335,8 @@ class TradingApp:
         else:
             if not is_auto: messagebox.showinfo("Success", f"{trade_type} order placed.")
             trade_source = f"Auto {trade_type}" if is_auto else f"Manual {trade_type}"
-            # Add to the "Open Positions" tab
-            # Values for open_positions_tree: (Ticket, Type, Price, TP, SL)
-            trade_values = (position_id, trade_source, price, tp, sl)
-            self.open_positions_tree.insert("", "end", iid=position_id, values=trade_values)
+            trade_values = (position_id, trade_source, price, tp, sl, "0.00")
+            self.open_positions_tree.insert("", "end", iid=position_id, values=trade_values, tags=('profit',))
 
     def on_closing(self):
         self.autotrade_enabled = False
