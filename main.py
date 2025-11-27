@@ -1,12 +1,18 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+import sys
 import threading
 import time
 from datetime import datetime, timezone
+import queue
+
 import MetaTrader5 as mt5
 import numpy as np
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+                             QLabel, QPushButton, QLineEdit, QComboBox, QGroupBox, QTabWidget, QTableView,
+                             QAbstractItemView, QHeaderView, QMessageBox)
+from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, Slot
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QColor
 
-# --- Indicator Functions ---
+# --- Indicator Functions (No changes) ---
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1: return np.array([])
     deltas = np.diff(prices)
@@ -30,16 +36,23 @@ def calculate_ema(prices, period):
     if len(prices) < period: return None
     return np.mean(prices[-period:])
 
-class TradingApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Gold EA Trading Bot")
-        self.root.geometry("800x800")
-        self.root.configure(bg="#1e1e1e")
+# --- Worker Signals ---
+class WorkerSignals(QObject):
+    update_status = Signal(str, str)
+    update_price = Signal(str)
+    add_open_trade = Signal(dict)
+    update_pl = Signal(str, float) # Changed ticket to str to handle large 64-bit IDs
+    move_to_history = Signal(dict)
+    show_message = Signal(str, str)
 
+# --- Backend Logic Worker ---
+class BackendWorker(QRunnable):
+    def __init__(self):
+        super().__init__()
+        self.signals = WorkerSignals()
         self.autotrade_enabled = False
-        self.strategy_thread = None
         self.last_trade_action = None
+        self.strategy_params = {}
 
         self.timeframe_map = {
             "1 Minute (M1)": mt5.TIMEFRAME_M1, "5 Minutes (M5)": mt5.TIMEFRAME_M5,
@@ -51,119 +64,33 @@ class TradingApp:
             mt5.TIMEFRAME_H1: 900, mt5.TIMEFRAME_H4: 1800,
         }
 
-        self.create_widgets()
-        self.start_mt5()
-
-    def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="10", style="Main.TFrame")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
-        self.style.configure("Main.TFrame", background="#1e1e1e")
-        self.style.configure("TLabel", background="#1e1e1e", foreground="white", font=("Arial", 12))
-        self.style.configure("TButton", foreground="white", font=("Arial", 12, "bold"))
-        self.style.configure("Green.TButton", background="#4CAF50"); self.style.map("Green.TButton", background=[("active", "#45a049")])
-        self.style.configure("Red.TButton", background="#f44336"); self.style.map("Red.TButton", background=[("active", "#da190b")])
-        self.style.configure("TEntry", fieldbackground="#333333", foreground="white", insertcolor="white")
-        self.style.configure("Disabled.TEntry", fieldbackground="#555555", foreground="#aaaaaa")
-        self.style.configure("Treeview", background="#333333", foreground="white", fieldbackground="#333333", rowheight=25)
-        self.style.map("Treeview", background=[("selected", "#4CAF50")])
-        self.style.configure("Treeview.Heading", background="#1e1e1e", foreground="white", font=("Arial", 12, "bold"))
-        self.style.configure("TLabelframe", background="#1e1e1e", foreground="white", bordercolor="#4CAF50")
-        self.style.configure("TLabelframe.Label", background="#1e1e1e", foreground="white", font=("Arial", 12, "bold"))
-        self.style.configure("TNotebook", background="#1e1e1e", borderwidth=0)
-        self.style.configure("TNotebook.Tab", background="#333333", foreground="white", padding=[10, 5], font=("Arial", 11, "bold"))
-        self.style.map("TNotebook.Tab", background=[("selected", "#4CAF50")])
-
-        self.status_label = ttk.Label(main_frame, text="Connecting to MetaTrader 5...", font=("Arial", 10), foreground="yellow")
-        self.status_label.pack(fill=tk.X)
-
-        price_frame = ttk.Frame(main_frame, style="Main.TFrame"); price_frame.pack(pady=10)
-        ttk.Label(price_frame, text="Gold Price (XAUUSDm):", font=("Arial", 16, "bold")).pack(side=tk.LEFT, padx=5)
-        self.price_label = ttk.Label(price_frame, text="N/A", font=("Arial", 16, "bold"), foreground="#FFD700"); self.price_label.pack(side=tk.LEFT)
-
-        manual_frame = ttk.LabelFrame(main_frame, text="Risk Management", padding="10"); manual_frame.pack(fill=tk.X, pady=10)
+    @Slot()
+    def run(self):
+        if not self.start_mt5():
+            return
         
-        ttk.Label(manual_frame, text="Take Profit ($):").grid(row=0, column=0, padx=5, pady=5)
-        self.tp_entry = ttk.Entry(manual_frame, width=10); self.tp_entry.grid(row=0, column=1, padx=5, pady=5); self.tp_entry.insert(0, "3.0")
-        
-        ttk.Label(manual_frame, text="Stop Loss ($):").grid(row=1, column=0, padx=5, pady=5)
-        self.sl_entry = ttk.Entry(manual_frame, width=10); self.sl_entry.grid(row=1, column=1, padx=5, pady=5); self.sl_entry.insert(0, "2.0")
-
-        ttk.Label(manual_frame, text="Max Positions:").grid(row=0, column=2, padx=(20, 5), pady=5)
-        self.max_pos_entry = ttk.Entry(manual_frame, width=10); self.max_pos_entry.grid(row=0, column=3, padx=5, pady=5); self.max_pos_entry.insert(0, "5")
-
-        buy_button = ttk.Button(manual_frame, text="Manual Buy", command=self.buy, style="Green.TButton"); buy_button.grid(row=1, column=2, padx=(20, 5), pady=5)
-        sell_button = ttk.Button(manual_frame, text="Manual Sell", command=self.sell, style="Red.TButton"); sell_button.grid(row=1, column=3, padx=5, pady=5)
-
-        strategy_frame = ttk.LabelFrame(main_frame, text="Strategy Settings", padding="10"); strategy_frame.pack(fill=tk.X, pady=10)
-        strategy_frame.columnconfigure(2, weight=1)
-        # (Strategy widgets setup as before)
-        ttk.Label(strategy_frame, text="Strategy:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.strategy_combo = ttk.Combobox(strategy_frame, values=["MA Crossover", "Trend Following", "Gold M5 Scalper"], state="readonly", width=17)
-        self.strategy_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w"); self.strategy_combo.set("MA Crossover")
-        self.strategy_combo.bind("<<ComboboxSelected>>", self.update_ui_for_strategy)
-        ttk.Label(strategy_frame, text="Timeframe:").grid(row=0, column=3, padx=5, pady=5, sticky="e")
-        self.timeframe_combo = ttk.Combobox(strategy_frame, values=list(self.timeframe_map.keys()), state="readonly", width=17)
-        self.timeframe_combo.grid(row=0, column=4, padx=5, pady=5, sticky="e"); self.timeframe_combo.set("1 Minute (M1)")
-        self.param1_label = ttk.Label(strategy_frame, text="Short MA Period:"); self.param1_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.param1_entry = ttk.Entry(strategy_frame, width=10); self.param1_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w"); self.param1_entry.insert(0, "10")
-        self.param2_label = ttk.Label(strategy_frame, text="Long MA Period:"); self.param2_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.param2_entry = ttk.Entry(strategy_frame, width=10); self.param2_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w"); self.param2_entry.insert(0, "50")
-        self.param3_label = ttk.Label(strategy_frame, text="Max Spread (pips):"); self.param3_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        self.param3_entry = ttk.Entry(strategy_frame, width=10); self.param3_entry.grid(row=3, column=1, padx=5, pady=5, sticky="w"); self.param3_entry.insert(0, "30")
-        self.autotrade_button = ttk.Button(strategy_frame, text="Start Auto Trading", command=self.toggle_autotrade, style="Green.TButton")
-        self.autotrade_button.grid(row=1, column=4, rowspan=2, padx=5, pady=5, sticky="nse")
-
-        # --- Tabbed History View ---
-        notebook_frame = ttk.Frame(main_frame, style="Main.TFrame")
-        notebook_frame.pack(pady=10, fill=tk.BOTH, expand=True)
-        notebook = ttk.Notebook(notebook_frame)
-        notebook.pack(fill=tk.BOTH, expand=True)
-
-        open_tab = ttk.Frame(notebook, style="Main.TFrame"); notebook.add(open_tab, text="Open Positions")
-        closed_tab = ttk.Frame(notebook, style="Main.TFrame"); notebook.add(closed_tab, text="Trade History")
-
-        # Open Positions Tree
-        self.open_positions_tree = ttk.Treeview(open_tab, columns=("Ticket", "Type", "Price", "TP", "SL", "P/L"), displaycolumns=("Type", "Price", "TP", "SL", "P/L"), show="headings")
-        self.open_positions_tree.heading("Type", text="Type"); self.open_positions_tree.heading("Price", text="Price"); self.open_positions_tree.heading("TP", text="Take Profit"); self.open_positions_tree.heading("SL", text="Stop Loss"); self.open_positions_tree.heading("P/L", text="P/L ($)")
-        self.open_positions_tree.pack(fill=tk.BOTH, expand=True)
-        self.open_positions_tree.tag_configure('profit', foreground='lightgreen')
-        self.open_positions_tree.tag_configure('loss', foreground='salmon')
-
-        # Closed Trades Tree
-        self.closed_trades_tree = ttk.Treeview(closed_tab, columns=("Ticket", "Type", "Price", "TP", "SL", "P/L", "Status"), displaycolumns=("Type", "Price", "TP", "SL", "P/L", "Status"), show="headings")
-        self.closed_trades_tree.heading("Type", text="Type"); self.closed_trades_tree.heading("Price", text="Price"); self.closed_trades_tree.heading("TP", text="Take Profit"); self.closed_trades_tree.heading("SL", text="Stop Loss"); self.closed_trades_tree.heading("P/L", text="P/L ($)"); self.closed_trades_tree.heading("Status", text="Status")
-        self.closed_trades_tree.pack(fill=tk.BOTH, expand=True)
-        
-        self.update_ui_for_strategy()
-
-    def update_ui_for_strategy(self, event=None):
-        strategy = self.strategy_combo.get()
-        if strategy == "Gold M5 Scalper":
-            self.timeframe_combo.set("5 Minutes (M5)"); self.timeframe_combo.config(state="disabled")
-            self.param1_label.config(state="disabled"); self.param1_entry.config(state="disabled")
-            self.param2_label.config(state="disabled"); self.param2_entry.config(state="disabled")
-            self.param3_label.config(state="normal"); self.param3_entry.config(state="normal")
-        else:
-            self.timeframe_combo.config(state="readonly")
-            self.param1_label.config(state="normal"); self.param1_entry.config(state="normal")
-            self.param2_label.config(state="normal"); self.param2_entry.config(state="normal")
-            self.param3_label.config(state="disabled"); self.param3_entry.config(state="disabled")
-            if strategy == "MA Crossover": self.param1_label.config(text="Short MA Period:"); self.param2_label.config(text="Long MA Period:")
-            elif strategy == "Trend Following": self.param1_label.config(text="Signal MA Period:"); self.param2_label.config(text="Trend MA Period:")
+        threading.Thread(target=self.update_price, daemon=True).start()
+        threading.Thread(target=self.sync_trade_history, daemon=True).start()
+        threading.Thread(target=self.strategy_main_loop, daemon=True).start()
 
     def start_mt5(self):
-        def connect():
-            if not mt5.initialize(): self.root.after(0, self.update_status, f"MT5 Initialize failed: {mt5.last_error()}", "red"); return
-            account_info = mt5.account_info()
-            if account_info is None: self.root.after(0, self.update_status, f"MT5: Could not get account info: {mt5.last_error()}", "red"); return
-            self.root.after(0, self.update_status, f"Connected to account #{account_info.login}", "green")
-            self.update_price()
-            # Start the history sync thread
-            sync_thread = threading.Thread(target=self.sync_trade_history, daemon=True); sync_thread.start()
-        threading.Thread(target=connect, daemon=True).start()
+        if not mt5.initialize():
+            self.signals.update_status.emit(f"MT5 Initialize failed: {mt5.last_error()}", "red")
+            return False
+        account_info = mt5.account_info()
+        if account_info is None:
+            self.signals.update_status.emit(f"MT5: Could not get account info: {mt5.last_error()}", "red")
+            return False
+        self.signals.update_status.emit(f"Connected to account #{account_info.login}", "green")
+        return True
+
+    def update_price(self):
+        symbol = "XAUUSDm"
+        while True:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                self.signals.update_price.emit(f"${tick.ask:.2f}")
+            time.sleep(1)
 
     def sync_trade_history(self):
         while True:
@@ -172,150 +99,40 @@ class TradingApp:
                 server_positions = {pos.ticket: pos for pos in open_positions} if open_positions else {}
                 server_tickets = set(server_positions.keys())
                 
-                gui_open_tickets = set(int(item_id) for item_id in self.open_positions_tree.get_children())
-                
+                gui_open_tickets = set(self.strategy_params.get('gui_tickets', set()))
+
                 closed_tickets = gui_open_tickets - server_tickets
                 still_open_tickets = gui_open_tickets.intersection(server_tickets)
 
-                if closed_tickets: self.root.after(0, self.move_trades_to_history, closed_tickets)
-                if still_open_tickets: self.root.after(0, self.update_open_positions_pl, still_open_tickets, server_positions)
+                for ticket in closed_tickets:
+                    deals = mt5.history_deals_get(position=ticket)
+                    final_pl = sum(d.profit + d.swap for d in deals) if deals else 0.0
+                    self.signals.move_to_history.emit({"ticket": ticket, "final_pl": final_pl})
 
-            except Exception as e: print(f"Error in history sync: {e}")
-            time.sleep(3)
+                for ticket in still_open_tickets:
+                    profit = server_positions[ticket].profit
+                    self.signals.update_pl.emit(str(ticket), profit) # Emit ticket as string
 
-    def update_open_positions_pl(self, tickets, server_positions):
-        for ticket in tickets:
-            try:
-                profit = server_positions[ticket].profit
-                pl_str = f"{profit:+.2f}"
-                tag = 'profit' if profit >= 0 else 'loss'
-                self.open_positions_tree.set(ticket, "P/L", pl_str)
-                self.open_positions_tree.item(ticket, tags=(tag,))
-            except Exception as e: print(f"Error updating P/L for ticket {ticket}: {e}")
-
-    def move_trades_to_history(self, ticket_ids):
-        for ticket in ticket_ids:
-            try:
-                item_values = self.open_positions_tree.item(ticket, 'values')
-                if not item_values: continue
-                
-                deals = mt5.history_deals_get(position=ticket)
-                final_pl = sum(d.profit for d in deals) if deals else 0.0
-                
-                # Values from open_positions_tree: (Ticket, Type, Price, TP, SL, P/L)
-                # We need to add "Closed" for the closed_trades_tree
-                closed_values = item_values[:-1] + (f"{final_pl:+.2f}", "Closed")
-                self.closed_trades_tree.insert("", "end", values=closed_values)
-                self.open_positions_tree.delete(ticket)
-            except Exception as e: print(f"Error moving trade {ticket} to history: {e}")
-
-    def update_status(self, text, color): self.status_label.config(text=text, foreground=color)
-    def update_price(self):
-        def fetch():
-            symbol = "XAUUSDm"
-            while True:
-                tick = mt5.symbol_info_tick(symbol)
-                if tick: self.root.after(0, self.price_label.config, {"text": f"${tick.ask}"})
-                time.sleep(1)
-        threading.Thread(target=fetch, daemon=True).start()
-
-    def toggle_autotrade(self):
-        if not self.autotrade_enabled:
-            try:
-                strategy = self.strategy_combo.get()
-                timeframe = self.timeframe_map[self.timeframe_combo.get()]
-                param1 = int(self.param1_entry.get()) if self.param1_entry.cget('state') != 'disabled' else None
-                param2 = int(self.param2_entry.get()) if self.param2_entry.cget('state') != 'disabled' else None
-                param3 = int(self.param3_entry.get()) if self.param3_entry.cget('state') != 'disabled' else None
-                if strategy != "Gold M5 Scalper" and param1 >= param2: messagebox.showerror("Error", "First MA period must be less than second MA period."); return
-                self.autotrade_enabled = True
-                self.autotrade_button.config(text="Stop Auto Trading", style="Red.TButton")
-                self.update_status(f"Auto Trading Started: {strategy} on {self.timeframe_combo.get()}", "cyan")
-                self.strategy_thread = threading.Thread(target=self.run_strategy_loop, args=(strategy, timeframe, param1, param2, param3), daemon=True)
-                self.strategy_thread.start()
-            except (ValueError, TypeError): messagebox.showerror("Error", "Invalid parameter. Please enter valid integers.")
-        else:
-            self.autotrade_enabled = False
-            self.autotrade_button.config(text="Start Auto Trading", style="Green.TButton")
-            self.update_status("Auto Trading Stopped.", "orange")
-            self.last_trade_action = None
-
-    def run_strategy_loop(self, strategy, timeframe, param1, param2, param3):
-        symbol = "XAUUSDm"
-        sleep_duration = self.sleep_intervals.get(timeframe, 60)
-        while self.autotrade_enabled:
-            try:
-                if strategy == "MA Crossover": self.run_ma_crossover_logic(strategy, symbol, timeframe, param1, param2)
-                elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
-                elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3)
-                time.sleep(sleep_duration)
-            except Exception as e: print(f"Error in strategy loop: {e}"); self.root.after(0, self.update_status, f"Strategy Error: {e}", "red"); time.sleep(30)
-
-    def run_gold_scalper_logic(self, strategy, symbol, max_spread):
-        server_time = datetime.now(timezone.utc)
-        if not (13 <= server_time.hour < 17): self.root.after(0, self.update_status, "Scalper: Outside trading hours (13:00-17:00 UTC). Waiting...", "orange"); return
-        symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info: self.root.after(0, self.update_status, "Scalper: Could not get symbol info.", "red"); return
-        spread = symbol_info.spread
-        if spread > max_spread: self.root.after(0, self.update_status, f"Scalper: Spread too high ({spread} > {max_spread}). Waiting...", "orange"); return
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
-        if rates is None or len(rates) < 22: self.root.after(0, self.update_status, "Scalper: Not enough data for indicators. Waiting...", "orange"); return
-        close_prices = np.array([r['close'] for r in rates])
-        rsi_values = calculate_rsi(close_prices, 14)
-        if rsi_values is None or len(rsi_values) < 2: return
-        current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
-        current_price = close_prices[-1]
-        ema21 = calculate_ema(close_prices, 21)
-        self.root.after(0, self.update_status, f"Scalper: Price={current_price:.2f}, EMA21={ema21:.2f}, RSI={current_rsi:.2f}", "cyan")
-        if current_price > ema21 and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
-            self.root.after(0, self.update_status, "Gold Scalper: Buy signal!", "green"); self.root.after(0, self.execute_trade, "Buy", is_auto=True); self.last_trade_action = "Buy"
-        elif current_price < ema21 and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
-            self.root.after(0, self.update_status, "Gold Scalper: Sell signal!", "red"); self.root.after(0, self.execute_trade, "Sell", is_auto=True); self.last_trade_action = "Sell"
-
-    def run_ma_crossover_logic(self, strategy, symbol, timeframe, short_period, long_period):
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, long_period + 5)
-        if rates is None or len(rates) < long_period: self.root.after(0, self.update_status, f"Not enough data for MA({long_period}). Waiting...", "orange"); return
-        close = np.array([rate['close'] for rate in rates])
-        short_ma = np.mean(close[-short_period:]); long_ma = np.mean(close[-long_period:])
-        prev_short_ma = np.mean(close[-short_period-1:-1]); prev_long_ma = np.mean(close[-long_period-1:-1])
-        self.root.after(0, self.update_status, f"Checking {strategy}: Short MA={short_ma:.2f}, Long MA={long_ma:.2f}", "cyan")
-        if prev_short_ma < prev_long_ma and short_ma > long_ma and self.last_trade_action != "Buy":
-            self.root.after(0, self.update_status, "MA Crossover: Buy signal!", "green"); self.root.after(0, self.execute_trade, "Buy", is_auto=True); self.last_trade_action = "Buy"
-        elif prev_short_ma > prev_long_ma and short_ma < long_ma and self.last_trade_action != "Sell":
-            self.root.after(0, self.update_status, "MA Crossover: Sell signal!", "red"); self.root.after(0, self.execute_trade, "Sell", is_auto=True); self.last_trade_action = "Sell"
-
-    def run_trend_following_logic(self, strategy, symbol, timeframe, signal_period, trend_period):
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, trend_period + 5)
-        if rates is None or len(rates) < trend_period: self.root.after(0, self.update_status, f"Not enough data for MA({trend_period}). Waiting...", "orange"); return
-        close = np.array([rate['close'] for rate in rates])
-        signal_ma = np.mean(close[-signal_period:]); trend_ma = np.mean(close[-trend_period:])
-        prev_close = close[-2]; curr_close = close[-1]
-        prev_signal_ma = np.mean(close[-signal_period-1:-1])
-        self.root.after(0, self.update_status, f"Checking {strategy}: Price={curr_close:.2f}, Trend MA={trend_ma:.2f}", "cyan")
-        is_uptrend = curr_close > trend_ma
-        if is_uptrend and self.last_trade_action != "Buy":
-            if prev_close < prev_signal_ma and curr_close > signal_ma:
-                self.root.after(0, self.update_status, "Trend Following: Buy signal!", "green"); self.root.after(0, self.execute_trade, "Buy", is_auto=True); self.last_trade_action = "Buy"
-        elif not is_uptrend and self.last_trade_action != "Sell":
-            if prev_close > prev_signal_ma and curr_close < signal_ma:
-                self.root.after(0, self.update_status, "Trend Following: Sell signal!", "red"); self.root.after(0, self.execute_trade, "Sell", is_auto=True); self.last_trade_action = "Sell"
-
-    def buy(self): self.execute_trade("Buy")
-    def sell(self): self.execute_trade("Sell")
+            except Exception as e:
+                print(f"Error in history sync: {e}")
+            time.sleep(5)
 
     def execute_trade(self, trade_type, is_auto=False):
         try:
-            tp_val = float(self.tp_entry.get()); sl_val = float(self.sl_entry.get())
-        except ValueError:
-            if not is_auto: messagebox.showerror("Error", "Invalid TP/SL values.")
-            else: self.root.after(0, self.update_status, "Auto-trade failed: Invalid TP/SL.", "red")
+            max_pos = self.strategy_params['max_pos']
+            open_positions = mt5.positions_get(magic=234000)
+            if open_positions and len(open_positions) >= max_pos:
+                self.signals.update_status.emit(f"Max positions ({max_pos}) reached. Signal ignored.", "orange")
+                return
+
+            tp_val = self.strategy_params['tp']; sl_val = self.strategy_params['sl']
+        except (ValueError, TypeError, KeyError):
+            self.signals.show_message.emit("Error", "Invalid Risk Management values.")
             return
 
         symbol = "XAUUSDm"; lot_size = 0.01
         tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            if not is_auto: messagebox.showerror("Error", "Could not fetch price for trade.")
-            return
+        if not tick: return
         
         price = tick.ask if trade_type == "Buy" else tick.bid
         tp = price + tp_val if trade_type == "Buy" else price - tp_val
@@ -331,20 +148,297 @@ class TradingApp:
                 position_id = deals[0].position_id
         
         if not position_id:
-            if not is_auto: messagebox.showerror("Error", f"Order failed: {result.comment}")
+            if not is_auto: self.signals.show_message.emit("Order Failed", f"Order failed: {result.comment}")
         else:
-            if not is_auto: messagebox.showinfo("Success", f"{trade_type} order placed.")
+            if not is_auto: self.signals.show_message.emit("Success", f"{trade_type} order placed.")
             trade_source = f"Auto {trade_type}" if is_auto else f"Manual {trade_type}"
-            trade_values = (position_id, trade_source, price, tp, sl, "0.00")
-            self.open_positions_tree.insert("", "end", iid=position_id, values=trade_values, tags=('profit',))
+            trade_values = {"ticket": position_id, "type": trade_source, "price": f"{price:.2f}", "tp": f"{tp:.2f}", "sl": f"{sl:.2f}"}
+            self.signals.add_open_trade.emit(trade_values)
 
-    def on_closing(self):
-        self.autotrade_enabled = False
+    def strategy_main_loop(self):
+        while True:
+            if self.autotrade_enabled:
+                strategy = self.strategy_params.get('strategy')
+                timeframe = self.strategy_params.get('timeframe')
+                param1 = self.strategy_params.get('param1')
+                param2 = self.strategy_params.get('param2')
+                param3 = self.strategy_params.get('param3')
+                
+                symbol = "XAUUSDm"
+                
+                try:
+                    if strategy == "MA Crossover": self.run_ma_crossover_logic(strategy, symbol, timeframe, param1, param2)
+                    elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
+                    elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3)
+                except Exception as e:
+                    print(f"Error in strategy run: {e}")
+                    self.signals.update_status.emit(f"Strategy Error: {e}", "red")
+                
+                # Interruptible sleep
+                sleep_duration = self.sleep_intervals.get(timeframe, 60)
+                for _ in range(sleep_duration):
+                    if not self.autotrade_enabled:
+                        break # Exit sleep loop immediately if stopped
+                    time.sleep(1)
+            else:
+                time.sleep(1) # Sleep briefly when disabled
+
+    # --- Individual Strategy Logics (No changes) ---
+    def run_ma_crossover_logic(self, strategy, symbol, timeframe, short_period, long_period):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, long_period + 5)
+        if rates is None or len(rates) < long_period: return
+        close = np.array([rate['close'] for rate in rates])
+        short_ma = np.mean(close[-short_period:]); long_ma = np.mean(close[-long_period:])
+        prev_short_ma = np.mean(close[-short_period-1:-1]); prev_long_ma = np.mean(close[-long_period-1:-1])
+        self.signals.update_status.emit(f"Checking {strategy}: Short MA={short_ma:.2f}, Long MA={long_ma:.2f}", "cyan")
+        if prev_short_ma < prev_long_ma and short_ma > long_ma and self.last_trade_action != "Buy":
+            self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
+        elif prev_short_ma > prev_long_ma and short_ma < long_ma and self.last_trade_action != "Sell":
+            self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
+
+    def run_trend_following_logic(self, strategy, symbol, timeframe, signal_period, trend_period):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, trend_period + 5)
+        if rates is None or len(rates) < trend_period: return
+        close = np.array([rate['close'] for rate in rates])
+        signal_ma = np.mean(close[-signal_period:]); trend_ma = np.mean(close[-trend_period:])
+        prev_close = close[-2]; curr_close = close[-1]
+        prev_signal_ma = np.mean(close[-signal_period-1:-1])
+        self.signals.update_status.emit(f"Checking {strategy}: Price={curr_close:.2f}, Trend MA={trend_ma:.2f}", "cyan")
+        is_uptrend = curr_close > trend_ma
+        if is_uptrend and self.last_trade_action != "Buy":
+            if prev_close < prev_signal_ma and curr_close > signal_ma:
+                self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
+        elif not is_uptrend and self.last_trade_action != "Sell":
+            if prev_close > prev_signal_ma and curr_close < signal_ma:
+                self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
+
+    def run_gold_scalper_logic(self, strategy, symbol, max_spread):
+        server_time = datetime.now(timezone.utc)
+        if not (13 <= server_time.hour < 17): self.signals.update_status.emit("Scalper: Outside trading hours (13:00-17:00 UTC).", "orange"); return
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info: return
+        if symbol_info.spread > max_spread: self.signals.update_status.emit(f"Scalper: Spread too high ({symbol_info.spread}). Waiting...", "orange"); return
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
+        if rates is None or len(rates) < 22: return
+        close_prices = np.array([r['close'] for r in rates])
+        rsi_values = calculate_rsi(close_prices, 14)
+        if len(rsi_values) < 2: return
+        current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
+        current_price = close_prices[-1]
+        ema21 = calculate_ema(close_prices, 21)
+        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f}, EMA21={ema21:.2f}, RSI={current_rsi:.2f}", "cyan")
+        if current_price > ema21 and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
+            self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
+        elif current_price < ema21 and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
+            self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
+
+# --- Main Window Class ---
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Gold EA Trading Bot")
+        self.setGeometry(100, 100, 900, 800)
+        self.setStyleSheet("""
+            QWidget { background-color: #1e1e1e; color: white; font-size: 11pt; }
+            QGroupBox { border: 1px solid #4CAF50; margin-top: 1em; font-weight: bold; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
+            QLineEdit, QComboBox { background-color: #333; border: 1px solid #555; padding: 5px; border-radius: 3px; }
+            QTableView { background-color: #333; gridline-color: #454545; }
+            QHeaderView::section { background-color: #2a2a2a; border: 1px solid #555; padding: 4px; font-weight: bold; }
+            QTabBar::tab { background: #333; padding: 10px; font-weight: bold; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+            QTabBar::tab:selected { background: #4CAF50; }
+            QPushButton#buyButton, QPushButton#startButton { background-color: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
+            QPushButton#buyButton:hover, QPushButton#startButton:hover { background-color: #218838; }
+            QPushButton#sellButton, QPushButton#stopButton { background-color: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
+            QPushButton#sellButton:hover, QPushButton#stopButton:hover { background-color: #c82333; }
+        """)
+        
+        self.open_positions_model = QStandardItemModel()
+        self.closed_trades_model = QStandardItemModel()
+        self.gui_open_tickets = set()
+
+        self._create_ui()
+        self._start_backend()
+
+    def _create_ui(self):
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QVBoxLayout(main_widget)
+
+        self.status_label = QLabel("Connecting to MetaTrader 5..."); self.status_label.setStyleSheet("color: yellow;")
+        layout.addWidget(self.status_label)
+
+        price_layout = QHBoxLayout()
+        price_layout.addWidget(QLabel("Gold Price (XAUUSDm):"))
+        self.price_label = QLabel("N/A"); self.price_label.setStyleSheet("color: #FFD700; font-weight: bold; font-size: 14pt;")
+        price_layout.addWidget(self.price_label)
+        price_layout.addStretch()
+        layout.addLayout(price_layout)
+
+        risk_box = QGroupBox("Risk Management")
+        risk_layout = QGridLayout(risk_box)
+        risk_layout.addWidget(QLabel("Take Profit ($):"), 0, 0); self.tp_input = QLineEdit("3.0"); risk_layout.addWidget(self.tp_input, 0, 1)
+        risk_layout.addWidget(QLabel("Stop Loss ($):"), 1, 0); self.sl_input = QLineEdit("2.0"); risk_layout.addWidget(self.sl_input, 1, 1)
+        risk_layout.addWidget(QLabel("Max Positions:"), 0, 2); self.max_pos_input = QLineEdit("5"); risk_layout.addWidget(self.max_pos_input, 0, 3)
+        self.buy_button = QPushButton("Manual Buy"); self.buy_button.setObjectName("buyButton"); self.buy_button.clicked.connect(self.manual_buy); risk_layout.addWidget(self.buy_button, 1, 2)
+        self.sell_button = QPushButton("Manual Sell"); self.sell_button.setObjectName("sellButton"); self.sell_button.clicked.connect(self.manual_sell); risk_layout.addWidget(self.sell_button, 1, 3)
+        layout.addWidget(risk_box)
+
+        strat_box = QGroupBox("Strategy Settings")
+        strat_layout = QGridLayout(strat_box)
+        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
+        strat_layout.addWidget(QLabel("Strategy:"), 0, 0); strat_layout.addWidget(self.strategy_combo, 0, 1)
+        self.timeframe_combo = QComboBox(); self.timeframe_combo.addItems(["1 Minute (M1)", "5 Minutes (M5)", "15 Minutes (M15)", "1 Hour (H1)", "4 Hours (H4)"])
+        strat_layout.addWidget(QLabel("Timeframe:"), 0, 2); strat_layout.addWidget(self.timeframe_combo, 0, 3)
+        self.param1_label = QLabel("Short MA Period:"); self.param1_input = QLineEdit("10")
+        strat_layout.addWidget(self.param1_label, 1, 0); strat_layout.addWidget(self.param1_input, 1, 1)
+        self.param2_label = QLabel("Long MA Period:"); self.param2_input = QLineEdit("50")
+        strat_layout.addWidget(self.param2_label, 2, 0); strat_layout.addWidget(self.param2_input, 2, 1)
+        self.param3_label = QLabel("Max Spread (pips):"); self.param3_input = QLineEdit("30")
+        strat_layout.addWidget(self.param3_label, 3, 0); strat_layout.addWidget(self.param3_input, 3, 1)
+        self.autotrade_button = QPushButton("Start Auto Trading"); self.autotrade_button.setObjectName("startButton"); self.autotrade_button.clicked.connect(self.toggle_autotrade)
+        strat_layout.addWidget(self.autotrade_button, 1, 3, 2, 1)
+        layout.addWidget(strat_box)
+        self.update_ui_for_strategy()
+
+        tabs = QTabWidget()
+        open_tab, closed_tab = QWidget(), QWidget()
+        tabs.addTab(open_tab, "Open Positions"); tabs.addTab(closed_tab, "Trade History")
+        
+        self.open_view = QTableView(); self.open_view.setModel(self.open_positions_model)
+        self.setup_table_view(self.open_view, self.open_positions_model, ["Ticket", "Type", "Price", "TP", "SL", "P/L ($)"])
+        open_layout = QVBoxLayout(open_tab); open_layout.addWidget(self.open_view)
+
+        self.closed_view = QTableView(); self.closed_view.setModel(self.closed_trades_model)
+        self.setup_table_view(self.closed_view, self.closed_trades_model, ["Ticket", "Type", "Price", "TP", "SL", "Final P/L", "Status"])
+        closed_layout = QVBoxLayout(closed_tab); closed_layout.addWidget(self.closed_view)
+        
+        layout.addWidget(tabs)
+
+    def setup_table_view(self, view, model, headers):
+        model.setHorizontalHeaderLabels(headers)
+        view.verticalHeader().setVisible(False)
+        view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+    def _start_backend(self):
+        self.threadpool = QThreadPool()
+        self.worker = BackendWorker()
+        self.worker.signals.update_status.connect(self.update_status)
+        self.worker.signals.update_price.connect(self.update_price)
+        self.worker.signals.add_open_trade.connect(self.add_open_trade)
+        self.worker.signals.update_pl.connect(self.update_pl)
+        self.worker.signals.move_to_history.connect(self.move_to_history)
+        self.worker.signals.show_message.connect(self.show_message)
+        self.threadpool.start(self.worker)
+
+    @Slot(str, str)
+    def update_status(self, text, color):
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {color};")
+
+    @Slot(str)
+    def update_price(self, text):
+        self.price_label.setText(text)
+
+    @Slot(dict)
+    def add_open_trade(self, trade_data):
+        ticket = trade_data['ticket']
+        if ticket in self.gui_open_tickets: return
+        self.gui_open_tickets.add(ticket)
+        self.worker.strategy_params['gui_tickets'] = self.gui_open_tickets
+        row = [QStandardItem(str(trade_data['ticket'])), QStandardItem(trade_data['type']), QStandardItem(trade_data['price']), QStandardItem(trade_data['tp']), QStandardItem(trade_data['sl']), QStandardItem("0.00")]
+        self.open_positions_model.appendRow(row)
+
+    @Slot(str, float)
+    def update_pl(self, ticket_str, profit):
+        ticket = int(ticket_str)
+        for row in range(self.open_positions_model.rowCount()):
+            if int(self.open_positions_model.item(row, 0).text()) == ticket:
+                pl_item = QStandardItem(f"{profit:+.2f}")
+                pl_item.setForeground(QColor("lightgreen") if profit >= 0 else QColor("salmon"))
+                self.open_positions_model.setItem(row, 5, pl_item)
+                break
+
+    @Slot(dict)
+    def move_to_history(self, data):
+        ticket = data['ticket']
+        if ticket not in self.gui_open_tickets: return
+        self.gui_open_tickets.remove(ticket)
+        self.worker.strategy_params['gui_tickets'] = self.gui_open_tickets
+        for row in range(self.open_positions_model.rowCount()):
+            if int(self.open_positions_model.item(row, 0).text()) == ticket:
+                trade_row = [self.open_positions_model.item(row, col).clone() for col in range(self.open_positions_model.columnCount())]
+                trade_row[5] = QStandardItem(f"{data['final_pl']:+.2f}")
+                trade_row.append(QStandardItem("Closed"))
+                self.closed_trades_model.appendRow(trade_row)
+                self.open_positions_model.removeRow(row)
+                break
+
+    @Slot(str, str)
+    def show_message(self, title, text):
+        QMessageBox.information(self, title, text)
+
+    def manual_buy(self):
+        self.worker.strategy_params.update(self.get_risk_params())
+        self.worker.execute_trade("Buy")
+
+    def manual_sell(self):
+        self.worker.strategy_params.update(self.get_risk_params())
+        self.worker.execute_trade("Sell")
+
+    def get_risk_params(self):
+        try:
+            return {'tp': float(self.tp_input.text()), 'sl': float(self.sl_input.text()), 'max_pos': int(self.max_pos_input.text())}
+        except (ValueError, TypeError):
+            self.show_message("Error", "Invalid values in Risk Management.")
+            return {}
+
+    def toggle_autotrade(self):
+        if not self.worker.autotrade_enabled:
+            params = self.get_risk_params()
+            if not params: return
+            try:
+                params['strategy'] = self.strategy_combo.currentText()
+                params['timeframe'] = self.worker.timeframe_map[self.timeframe_combo.currentText()]
+                if self.param1_input.isEnabled(): params['param1'] = int(self.param1_input.text())
+                if self.param2_input.isEnabled(): params['param2'] = int(self.param2_input.text())
+                if self.param3_input.isEnabled(): params['param3'] = int(self.param3_input.text())
+            except (ValueError, TypeError, KeyError):
+                self.show_message("Error", "Invalid values in Strategy Settings.")
+                return
+            self.worker.strategy_params = params
+            self.worker.autotrade_enabled = True
+            self.autotrade_button.setText("Stop Auto Trading")
+            self.autotrade_button.setObjectName("stopButton")
+            self.autotrade_button.style().unpolish(self.autotrade_button); self.autotrade_button.style().polish(self.autotrade_button)
+        else:
+            self.worker.autotrade_enabled = False
+            self.worker.last_trade_action = None
+            self.autotrade_button.setText("Start Auto Trading")
+            self.autotrade_button.setObjectName("startButton")
+            self.autotrade_button.style().unpolish(self.autotrade_button); self.autotrade_button.style().polish(self.autotrade_button)
+
+    def update_ui_for_strategy(self):
+        strategy = self.strategy_combo.currentText()
+        is_scalper = (strategy == "Gold M5 Scalper")
+        self.timeframe_combo.setEnabled(not is_scalper)
+        if is_scalper: self.timeframe_combo.setCurrentText("5 Minutes (M5)")
+        self.param1_label.setVisible(not is_scalper); self.param1_input.setVisible(not is_scalper)
+        self.param2_label.setVisible(not is_scalper); self.param2_input.setVisible(not is_scalper)
+        self.param3_label.setVisible(is_scalper); self.param3_input.setVisible(is_scalper)
+        if not is_scalper:
+            if strategy == "MA Crossover": self.param1_label.setText("Short MA Period:"); self.param2_label.setText("Long MA Period:")
+            elif strategy == "Trend Following": self.param1_label.setText("Signal MA Period:"); self.param2_label.setText("Trend MA Period:")
+
+    def closeEvent(self, event):
+        self.worker.autotrade_enabled = False
         mt5.shutdown()
-        self.root.destroy()
+        event.accept()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = TradingApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
