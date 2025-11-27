@@ -164,12 +164,13 @@ class TradingApp:
                 
                 # Check GUI for trades that are no longer open
                 for item_id in self.history_tree.get_children():
-                    values = self.history_tree.item(item_id, 'values')
-                    status = values[4] # Status is the 5th column
+                    # Directly get the value from the "Status" column
+                    status = self.history_tree.set(item_id, "Status")
                     if status == "Open":
                         ticket = int(item_id)
                         if ticket not in open_tickets:
-                            self.root.after(0, self.history_tree.set, item_id, column="Status", value="Closed")
+                            # Use .after() to safely update the GUI from the thread
+                            self.root.after(0, self.history_tree.set, item_id, "Status", "Closed")
             except Exception as e:
                 print(f"Error in history sync: {e}")
             time.sleep(15)
