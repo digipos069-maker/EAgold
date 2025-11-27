@@ -244,6 +244,11 @@ class MainWindow(QMainWindow):
             QGroupBox { border: 1px solid #4CAF50; margin-top: 1em; font-weight: bold; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
             QLineEdit, QComboBox { background-color: #333; border: 1px solid #555; padding: 5px; border-radius: 3px; }
+            QComboBox:disabled, QLineEdit:disabled {
+                background-color: #2a2a2a;
+                color: #777;
+                border-color: #444;
+            }
             QTableView { background-color: #333; gridline-color: #454545; }
             QHeaderView::section { background-color: #2a2a2a; border: 1px solid #555; padding: 4px; font-weight: bold; }
             QTabBar::tab { background: #333; padding: 10px; font-weight: bold; border-top-left-radius: 4px; border-top-right-radius: 4px; }
@@ -424,14 +429,21 @@ class MainWindow(QMainWindow):
     def update_ui_for_strategy(self):
         strategy = self.strategy_combo.currentText()
         is_scalper = (strategy == "Gold M5 Scalper")
+        
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: self.timeframe_combo.setCurrentText("5 Minutes (M5)")
-        self.param1_label.setVisible(not is_scalper); self.param1_input.setVisible(not is_scalper)
-        self.param2_label.setVisible(not is_scalper); self.param2_input.setVisible(not is_scalper)
-        self.param3_label.setVisible(is_scalper); self.param3_input.setVisible(is_scalper)
+        
+        self.param1_label.setEnabled(not is_scalper); self.param1_input.setEnabled(not is_scalper)
+        self.param2_label.setEnabled(not is_scalper); self.param2_input.setEnabled(not is_scalper)
+        self.param3_label.setEnabled(is_scalper); self.param3_input.setEnabled(is_scalper)
+
         if not is_scalper:
-            if strategy == "MA Crossover": self.param1_label.setText("Short MA Period:"); self.param2_label.setText("Long MA Period:")
-            elif strategy == "Trend Following": self.param1_label.setText("Signal MA Period:"); self.param2_label.setText("Trend MA Period:")
+            if strategy == "MA Crossover":
+                self.param1_label.setText("Short MA Period:")
+                self.param2_label.setText("Long MA Period:")
+            elif strategy == "Trend Following":
+                self.param1_label.setText("Signal MA Period:")
+                self.param2_label.setText("Trend MA Period:")
 
     def closeEvent(self, event):
         self.worker.autotrade_enabled = False
