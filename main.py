@@ -3,6 +3,7 @@ import threading
 import time
 from datetime import datetime, timezone
 import queue
+import signal
 
 import MetaTrader5 as mt5
 import numpy as np
@@ -439,6 +440,8 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    # Allow Ctrl+C to close the application
+    signal.signal(signal.SIGINT, lambda sig, frame: app.quit())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
