@@ -272,18 +272,26 @@ class TradingApp:
         request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lot_size, "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
         result = mt5.order_send(request)
         
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            status_msg = f"Failed: {result.comment}"
+        position_id = None
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            # The result.deal is the deal ticket. We need to find the position this deal is associated with.
+            # We can get this by looking up the deal in the history.
+            deals = mt5.history_deals_get(ticket=result.deal)
+            if deals and len(deals) > 0:
+                position_id = deals[0].position_id
+        
+        status_msg = f"Failed: {result.comment}" if not position_id else "Open"
+
+        if status_msg != "Open":
             if not is_auto: messagebox.showerror("Error", f"Order failed: {result.comment}")
-        else:
-            status_msg = "Open"
-            if not is_auto: messagebox.showinfo("Success", f"{trade_type} order placed.")
+        elif not is_auto: 
+            messagebox.showinfo("Success", f"{trade_type} order placed.")
         
         trade_source = f"Auto {trade_type}" if is_auto else f"Manual {trade_type}"
         
         # Use the position ticket as the unique ID for the treeview item
-        position_id = result.deal_id if result else None
         if position_id:
+             # The first value in `values` is the hidden ticket ID
              self.history_tree.insert("", "end", iid=position_id, values=(position_id, trade_source, price, tp, sl, status_msg))
 
     def on_closing(self):
