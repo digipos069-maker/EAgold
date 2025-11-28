@@ -171,6 +171,7 @@ class BackendWorker(QRunnable):
                     if strategy == "MA Crossover": self.run_ma_crossover_logic(strategy, symbol, timeframe, param1, param2)
                     elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
                     elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3)
+                    elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, symbol, timeframe)
                 except Exception as e:
                     print(f"Error in strategy run: {e}")
                     self.signals.update_status.emit(f"Strategy Error: {e}", "red")
@@ -227,11 +228,64 @@ class BackendWorker(QRunnable):
         current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
         current_price = close_prices[-1]
         ema21 = calculate_ema(close_prices, 21)
+        if ema21 is None:
+            self.signals.update_status.emit(f"Scalper: Not enough data for EMA21.", "orange")
+            return
         self.signals.update_status.emit(f"Scalper: Price={current_price:.2f}, EMA21={ema21:.2f}, RSI={current_rsi:.2f}", "cyan")
         if current_price > ema21 and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
             self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
         elif current_price < ema21 and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
             self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
+
+    def run_ict_trader_logic(self, strategy, symbol, timeframe):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 205)
+        if rates is None or len(rates) < 205:
+            self.signals.update_status.emit("ICT: Not enough data.", "orange")
+            return
+
+        close_prices = np.array([r['close'] for r in rates])
+        high_prices = np.array([r['high'] for r in rates])
+        low_prices = np.array([r['low'] for r in rates])
+        
+        ema200 = calculate_ema(close_prices, 200)
+        if ema200 is None:
+            self.signals.update_status.emit("ICT: Could not calculate EMA 200.", "orange")
+            return
+            
+        current_price = close_prices[-1]
+        self.signals.update_status.emit(f"ICT: Price={current_price:.2f}, EMA200={ema200:.2f}", "cyan")
+
+        # FVG Detection
+        fvg_top = None
+        fvg_bottom = None
+        
+        # Look for the most recent FVG in the last 10 candles
+        for i in range(len(rates) - 3, len(rates) - 13, -1):
+            # Bullish FVG (Imbalance)
+            if high_prices[i-1] < low_prices[i+1]:
+                fvg_top = low_prices[i+1]
+                fvg_bottom = high_prices[i-1]
+                # Check if price is inside the FVG
+                if current_price <= fvg_top and current_price >= fvg_bottom:
+                    if current_price > ema200 and self.last_trade_action != "Buy":
+                        self.signals.update_status.emit(f"ICT: Bullish FVG detected and entered. Price={current_price:.2f}", "yellow")
+                        self.last_trade_action = "Buy"
+                        self.execute_trade("Buy", is_auto=True)
+                        return
+                    
+            # Bearish FVG (Imbalance)
+            elif low_prices[i-1] > high_prices[i+1]:
+                fvg_top = low_prices[i-1]
+                fvg_bottom = high_prices[i+1]
+                # Check if price is inside the FVG
+                if current_price <= fvg_top and current_price >= fvg_bottom:
+                    if current_price < ema200 and self.last_trade_action != "Sell":
+                        self.signals.update_status.emit(f"ICT: Bearish FVG detected and entered. Price={current_price:.2f}", "yellow")
+                        self.last_trade_action = "Sell"
+                        self.execute_trade("Sell", is_auto=True)
+                        return
+        self.signals.update_status.emit(f"ICT: No FVG entry signal. Price={current_price:.2f}, EMA200={ema200:.2f}", "cyan")
+
 
 # --- Main Window Class ---
 class MainWindow(QMainWindow):
@@ -292,7 +346,7 @@ class MainWindow(QMainWindow):
 
         strat_box = QGroupBox("Strategy Settings")
         strat_layout = QGridLayout(strat_box)
-        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
+        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
         strat_layout.addWidget(QLabel("Strategy:"), 0, 0); strat_layout.addWidget(self.strategy_combo, 0, 1)
         self.timeframe_combo = QComboBox(); self.timeframe_combo.addItems(["1 Minute (M1)", "5 Minutes (M5)", "15 Minutes (M15)", "1 Hour (H1)", "4 Hours (H4)"])
         strat_layout.addWidget(QLabel("Timeframe:"), 0, 2); strat_layout.addWidget(self.timeframe_combo, 0, 3)
@@ -429,15 +483,19 @@ class MainWindow(QMainWindow):
     def update_ui_for_strategy(self):
         strategy = self.strategy_combo.currentText()
         is_scalper = (strategy == "Gold M5 Scalper")
-        
+        is_ict = (strategy == "ICT Trader")
+
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: self.timeframe_combo.setCurrentText("5 Minutes (M5)")
-        
-        self.param1_label.setEnabled(not is_scalper); self.param1_input.setEnabled(not is_scalper)
-        self.param2_label.setEnabled(not is_scalper); self.param2_input.setEnabled(not is_scalper)
-        self.param3_label.setEnabled(is_scalper); self.param3_input.setEnabled(is_scalper)
 
-        if not is_scalper:
+        self.param1_label.setEnabled(not is_scalper and not is_ict)
+        self.param1_input.setEnabled(not is_scalper and not is_ict)
+        self.param2_label.setEnabled(not is_scalper and not is_ict)
+        self.param2_input.setEnabled(not is_scalper and not is_ict)
+        self.param3_label.setEnabled(is_scalper)
+        self.param3_input.setEnabled(is_scalper)
+
+        if not is_scalper and not is_ict:
             if strategy == "MA Crossover":
                 self.param1_label.setText("Short MA Period:")
                 self.param2_label.setText("Long MA Period:")
