@@ -345,8 +345,9 @@ class BackendWorker(QRunnable):
         # --- Helper function to find swing points ---
         def find_swing_points(highs, lows, lookback):
             swings = []
-            # Start from 'lookback' index from the end, to 'lookback' from the start
-            for i in range(len(highs) - lookback, lookback, -1):
+            # Corrected loop range.
+            # It must stop 'lookback' candles from the end to prevent index out of bounds on the forward-looking check.
+            for i in range(len(highs) - lookback - 1, lookback - 1, -1):
                 # Swing High: high at index i is highest in window
                 is_swing_high = all(highs[i] > highs[i-k] for k in range(1, lookback + 1)) and \
                                 all(highs[i] > highs[i+k] for k in range(1, lookback + 1))
