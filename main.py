@@ -118,7 +118,7 @@ class BackendWorker(QRunnable):
                 print(f"Error in history sync: {e}")
             time.sleep(5)
 
-    def execute_trade(self, trade_type, is_auto=False):
+    def execute_trade(self, trade_type, is_auto=False, sl_price=None, tp_price=None):
         try:
             max_pos = self.strategy_params['max_pos']
             open_positions = mt5.positions_get(magic=234000)
@@ -136,8 +136,10 @@ class BackendWorker(QRunnable):
         if not tick: return
         
         price = tick.ask if trade_type == "Buy" else tick.bid
-        tp = price + tp_val if trade_type == "Buy" else price - tp_val
-        sl = price - sl_val if trade_type == "Buy" else price + sl_val
+        
+        # Use provided sl/tp prices if available, otherwise calculate from UI values
+        sl = sl_price if sl_price is not None else (price - sl_val if trade_type == "Buy" else price + sl_val)
+        tp = tp_price if tp_price is not None else (price + tp_val if trade_type == "Buy" else price - tp_val)
 
         request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lot_size, "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
         result = mt5.order_send(request)
@@ -172,6 +174,7 @@ class BackendWorker(QRunnable):
                     elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
                     elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3)
                     elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, symbol, timeframe)
+                    elif strategy == "ICT Gold Scalping": self.run_ict_gold_scalping_logic(strategy, symbol, timeframe)
                 except Exception as e:
                     print(f"Error in strategy run: {e}")
                     self.signals.update_status.emit(f"Strategy Error: {e}", "red")
@@ -286,6 +289,138 @@ class BackendWorker(QRunnable):
                         return
         self.signals.update_status.emit(f"ICT: No FVG entry signal. Price={current_price:.2f}, EMA200={ema200:.2f}", "cyan")
 
+    def run_ict_gold_scalping_logic(self, strategy, symbol, timeframe):
+        # --- Strategy Parameters ---
+        LOOKBACK_PERIOD = 40 # Number of candles to analyze for setups
+        SWING_POINT_LOOKBACK = 5 # How many candles to look left and right for a swing point
+
+        # --- Session Filter ---
+        server_time = datetime.now(timezone.utc)
+        if not (8 <= server_time.hour < 17):
+            self.signals.update_status.emit(f"ICT Scalp: Outside trading hours (8-17 UTC).", "orange")
+            return
+
+        # --- Data Fetching ---
+        # Higher timeframe for bias
+        h1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 201)
+        # Lower timeframe for execution
+        ltf_rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, LOOKBACK_PERIOD + SWING_POINT_LOOKBACK)
+
+        if h1_rates is None or ltf_rates is None or len(h1_rates) < 201 or len(ltf_rates) < LOOKBACK_PERIOD:
+            self.signals.update_status.emit(f"ICT Scalp: Not enough data.", "orange")
+            return
+
+        h1_close = np.array([r['close'] for r in h1_rates])
+        ltf_high = np.array([r['high'] for r in ltf_rates])
+        ltf_low = np.array([r['low'] for r in ltf_rates])
+        ltf_close = np.array([r['close'] for r in ltf_rates])
+        current_price = ltf_close[-1]
+
+        # --- HTF Bias ---
+        h1_ema200 = calculate_ema(h1_close, 200)
+        if h1_ema200 is None:
+            self.signals.update_status.emit(f"ICT Scalp: Cannot calculate H1 EMA.", "orange")
+            return
+        
+        is_bullish_bias = current_price > h1_ema200
+        is_bearish_bias = current_price < h1_ema200
+        
+        status_msg = f"ICT Scalp: Price={current_price:.2f} | H1 EMA={h1_ema200:.2f} | Bias={'Bullish' if is_bullish_bias else 'Bearish'}"
+        self.signals.update_status.emit(status_msg, "cyan")
+
+        # --- Helper function to find swing points ---
+        def find_swing_points(highs, lows, lookback):
+            swings = []
+            # Start from 'lookback' index from the end, to 'lookback' from the start
+            for i in range(len(highs) - lookback, lookback, -1):
+                # Swing High: high at index i is highest in window
+                is_swing_high = all(highs[i] > highs[i-k] for k in range(1, lookback + 1)) and \
+                                all(highs[i] > highs[i+k] for k in range(1, lookback + 1))
+                # Swing Low: low at index i is lowest in window
+                is_swing_low = all(lows[i] < lows[i-k] for k in range(1, lookback + 1)) and \
+                               all(lows[i] < lows[i+k] for k in range(1, lookback + 1))
+                
+                if is_swing_high:
+                    swings.append({'type': 'high', 'price': highs[i], 'index': i})
+                elif is_swing_low:
+                    swings.append({'type': 'low', 'price': lows[i], 'index': i})
+            return swings
+
+        swing_points = find_swing_points(ltf_high, ltf_low, SWING_POINT_LOOKBACK)
+        if len(swing_points) < 2:
+            self.signals.update_status.emit(f"{status_msg} | Waiting for market structure...", "cyan")
+            return
+
+        # --- Core ICT Logic: Look for (1) Liquidity Grab -> (2) MSS -> (3) Retracement to FVG ---
+        # This logic iterates backwards from the most recent swing point
+        for i in range(len(swing_points) - 1):
+            recent_swing = swing_points[i]
+            prev_swing = swing_points[i+1]
+
+            # === Potential Bearish Setup (Sell) ===
+            # Condition 1: Must have bearish bias. Recent swing must be a high, previous must be a low.
+            if is_bearish_bias and recent_swing['type'] == 'high' and prev_swing['type'] == 'low':
+                liquidity_grab_high = recent_swing['price']
+                structure_low_to_break = prev_swing['price']
+                
+                # Condition 2: Check for MSS. Has price broken below the previous swing low?
+                # We check candles from the liquidity grab high up to the current candle
+                mss_confirmed = False
+                for j in range(recent_swing['index'], len(ltf_low)):
+                    if ltf_low[j] < structure_low_to_break:
+                        mss_confirmed = True
+                        break
+                
+                if mss_confirmed:
+                    # Condition 3: Find FVG created during the MSS move
+                    # Look for FVG between the liquidity grab and the break of structure
+                    for k in range(recent_swing['index'], len(ltf_close) - 2):
+                        # Bearish FVG: low of candle k-1 is higher than high of candle k+1
+                        if ltf_low[k-1] > ltf_high[k+1]:
+                            fvg_top = ltf_low[k-1]
+                            fvg_bottom = ltf_high[k+1]
+                            
+                            # Condition 4: Check if current price has retraced into the FVG
+                            if fvg_bottom <= current_price <= fvg_top and self.last_trade_action != "Sell":
+                                self.signals.update_status.emit(f"ICT Scalp: Bearish FVG entry found at {current_price:.2f}", "yellow")
+                                self.last_trade_action = "Sell"
+                                # Set SL above the liquidity grab high
+                                stop_loss_price = liquidity_grab_high + 0.5 
+                                self.execute_trade("Sell", is_auto=True, sl_price=stop_loss_price)
+                                return # Exit after finding a trade
+
+            # === Potential Bullish Setup (Buy) ===
+            # Condition 1: Must have bullish bias. Recent swing must be a low, previous must be a high.
+            if is_bullish_bias and recent_swing['type'] == 'low' and prev_swing['type'] == 'high':
+                liquidity_grab_low = recent_swing['price']
+                structure_high_to_break = prev_swing['price']
+
+                # Condition 2: Check for MSS. Has price broken above the previous swing high?
+                mss_confirmed = False
+                for j in range(recent_swing['index'], len(ltf_high)):
+                    if ltf_high[j] > structure_high_to_break:
+                        mss_confirmed = True
+                        break
+
+                if mss_confirmed:
+                    # Condition 3: Find FVG created during the MSS move
+                    for k in range(recent_swing['index'], len(ltf_close) - 2):
+                        # Bullish FVG: high of k-1 is lower than low of k+1
+                        if ltf_high[k-1] < ltf_low[k+1]:
+                            fvg_top = ltf_low[k+1]
+                            fvg_bottom = ltf_high[k-1]
+                            
+                            # Condition 4: Check if current price has retraced into the FVG
+                            if fvg_bottom <= current_price <= fvg_top and self.last_trade_action != "Buy":
+                                self.signals.update_status.emit(f"ICT Scalp: Bullish FVG entry found at {current_price:.2f}", "yellow")
+                                self.last_trade_action = "Buy"
+                                # Set SL below the liquidity grab low
+                                stop_loss_price = liquidity_grab_low - 0.5
+                                self.execute_trade("Buy", is_auto=True, sl_price=stop_loss_price)
+                                return # Exit after finding a trade
+        return # No setup found
+
+
 
 # --- Main Window Class ---
 class MainWindow(QMainWindow):
@@ -346,7 +481,7 @@ class MainWindow(QMainWindow):
 
         strat_box = QGroupBox("Strategy Settings")
         strat_layout = QGridLayout(strat_box)
-        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
+        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader", "ICT Gold Scalping"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
         strat_layout.addWidget(QLabel("Strategy:"), 0, 0); strat_layout.addWidget(self.strategy_combo, 0, 1)
         self.timeframe_combo = QComboBox(); self.timeframe_combo.addItems(["1 Minute (M1)", "5 Minutes (M5)", "15 Minutes (M15)", "1 Hour (H1)", "4 Hours (H4)"])
         strat_layout.addWidget(QLabel("Timeframe:"), 0, 2); strat_layout.addWidget(self.timeframe_combo, 0, 3)
@@ -484,18 +619,23 @@ class MainWindow(QMainWindow):
         strategy = self.strategy_combo.currentText()
         is_scalper = (strategy == "Gold M5 Scalper")
         is_ict = (strategy == "ICT Trader")
+        is_ict_scalper = (strategy == "ICT Gold Scalping")
 
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: self.timeframe_combo.setCurrentText("5 Minutes (M5)")
 
-        self.param1_label.setEnabled(not is_scalper and not is_ict)
-        self.param1_input.setEnabled(not is_scalper and not is_ict)
-        self.param2_label.setEnabled(not is_scalper and not is_ict)
-        self.param2_input.setEnabled(not is_scalper and not is_ict)
+        # Disable parameter inputs for ICT strategies
+        params_enabled = not (is_scalper or is_ict or is_ict_scalper)
+        self.param1_label.setEnabled(params_enabled)
+        self.param1_input.setEnabled(params_enabled)
+        self.param2_label.setEnabled(params_enabled)
+        self.param2_input.setEnabled(params_enabled)
+        
+        # Specific handling for Gold M5 Scalper's param3
         self.param3_label.setEnabled(is_scalper)
         self.param3_input.setEnabled(is_scalper)
 
-        if not is_scalper and not is_ict:
+        if params_enabled:
             if strategy == "MA Crossover":
                 self.param1_label.setText("Short MA Period:")
                 self.param2_label.setText("Long MA Period:")
