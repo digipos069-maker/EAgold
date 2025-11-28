@@ -161,6 +161,28 @@ class BackendWorker(QRunnable):
     def strategy_main_loop(self):
         while True:
             if self.autotrade_enabled:
+                # --- Global Time Filter ---
+                try:
+                    start_time = self.strategy_params.get('start_time')
+                    end_time = self.strategy_params.get('end_time')
+                    
+                    if start_time and end_time:
+                        current_time = datetime.now(timezone.utc).time()
+                        
+                        # Handle overnight sessions (e.g., end_time is earlier than start_time)
+                        if start_time <= end_time:
+                            if not (start_time <= current_time <= end_time):
+                                self.signals.update_status.emit(f"Outside trading hours ({start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')} UTC).", "orange")
+                                time.sleep(60) # Sleep longer when outside hours
+                                continue
+                        else: # Overnight session
+                            if not (current_time >= start_time or current_time <= end_time):
+                                self.signals.update_status.emit(f"Outside trading hours ({start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')} UTC).", "orange")
+                                time.sleep(60)
+                                continue
+                except Exception as e:
+                    self.signals.update_status.emit(f"Time filter error: {e}", "red")
+
                 strategy = self.strategy_params.get('strategy')
                 timeframe = self.strategy_params.get('timeframe')
                 param1 = self.strategy_params.get('param1')
@@ -218,8 +240,6 @@ class BackendWorker(QRunnable):
                 self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
 
     def run_gold_scalper_logic(self, strategy, symbol, max_spread):
-        server_time = datetime.now(timezone.utc)
-        if not (13 <= server_time.hour < 17): self.signals.update_status.emit("Scalper: Outside trading hours (13:00-17:00 UTC).", "orange"); return
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info: return
         if symbol_info.spread > max_spread: self.signals.update_status.emit(f"Scalper: Spread too high ({symbol_info.spread}). Waiting...", "orange"); return
@@ -293,12 +313,6 @@ class BackendWorker(QRunnable):
         # --- Strategy Parameters ---
         LOOKBACK_PERIOD = 40 # Number of candles to analyze for setups
         SWING_POINT_LOOKBACK = 5 # How many candles to look left and right for a swing point
-
-        # --- Session Filter ---
-        server_time = datetime.now(timezone.utc)
-        if not (8 <= server_time.hour < 17):
-            self.signals.update_status.emit(f"ICT Scalp: Outside trading hours (8-17 UTC).", "orange")
-            return
 
         # --- Data Fetching ---
         # Higher timeframe for bias
@@ -485,14 +499,21 @@ class MainWindow(QMainWindow):
         strat_layout.addWidget(QLabel("Strategy:"), 0, 0); strat_layout.addWidget(self.strategy_combo, 0, 1)
         self.timeframe_combo = QComboBox(); self.timeframe_combo.addItems(["1 Minute (M1)", "5 Minutes (M5)", "15 Minutes (M15)", "1 Hour (H1)", "4 Hours (H4)"])
         strat_layout.addWidget(QLabel("Timeframe:"), 0, 2); strat_layout.addWidget(self.timeframe_combo, 0, 3)
+
+        self.start_time_label = QLabel("Start Time (UTC):"); self.start_time_input = QLineEdit("08:00")
+        strat_layout.addWidget(self.start_time_label, 1, 2); strat_layout.addWidget(self.start_time_input, 1, 3)
+        self.end_time_label = QLabel("End Time (UTC):"); self.end_time_input = QLineEdit("17:00")
+        strat_layout.addWidget(self.end_time_label, 2, 2); strat_layout.addWidget(self.end_time_input, 2, 3)
+
         self.param1_label = QLabel("Short MA Period:"); self.param1_input = QLineEdit("10")
         strat_layout.addWidget(self.param1_label, 1, 0); strat_layout.addWidget(self.param1_input, 1, 1)
         self.param2_label = QLabel("Long MA Period:"); self.param2_input = QLineEdit("50")
         strat_layout.addWidget(self.param2_label, 2, 0); strat_layout.addWidget(self.param2_input, 2, 1)
         self.param3_label = QLabel("Max Spread (pips):"); self.param3_input = QLineEdit("30")
         strat_layout.addWidget(self.param3_label, 3, 0); strat_layout.addWidget(self.param3_input, 3, 1)
+        
         self.autotrade_button = QPushButton("Start Auto Trading"); self.autotrade_button.setObjectName("startButton"); self.autotrade_button.clicked.connect(self.toggle_autotrade)
-        strat_layout.addWidget(self.autotrade_button, 1, 3, 2, 1)
+        strat_layout.addWidget(self.autotrade_button, 4, 0, 1, 4)
         layout.addWidget(strat_box)
         self.update_ui_for_strategy()
 
@@ -595,13 +616,19 @@ class MainWindow(QMainWindow):
             params = self.get_risk_params()
             if not params: return
             try:
+                # Validate and parse times
+                start_time_str = self.start_time_input.text()
+                end_time_str = self.end_time_input.text()
+                params['start_time'] = datetime.strptime(start_time_str, "%H:%M").time()
+                params['end_time'] = datetime.strptime(end_time_str, "%H:%M").time()
+
                 params['strategy'] = self.strategy_combo.currentText()
                 params['timeframe'] = self.worker.timeframe_map[self.timeframe_combo.currentText()]
                 if self.param1_input.isEnabled(): params['param1'] = int(self.param1_input.text())
                 if self.param2_input.isEnabled(): params['param2'] = int(self.param2_input.text())
                 if self.param3_input.isEnabled(): params['param3'] = int(self.param3_input.text())
             except (ValueError, TypeError, KeyError):
-                self.show_message("Error", "Invalid values in Strategy Settings.")
+                self.show_message("Error", "Invalid values in Strategy Settings. Ensure time is HH:MM.")
                 return
             self.worker.strategy_params = params
             self.worker.autotrade_enabled = True
