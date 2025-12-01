@@ -9,7 +9,8 @@ import MetaTrader5 as mt5
 import numpy as np
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QLabel, QPushButton, QLineEdit, QComboBox, QGroupBox, QTabWidget, QTableView,
-                             QAbstractItemView, QHeaderView, QMessageBox, QSizeGrip, QFrame)
+                             QAbstractItemView, QHeaderView, QMessageBox, QSizeGrip, QFrame, QDialog,
+                             QDialogButtonBox, QFormLayout)
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, Slot, Qt, QPoint, QSize
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QColor
 
@@ -194,7 +195,7 @@ class BackendWorker(QRunnable):
                 try:
                     if strategy == "MA Crossover": self.run_ma_crossover_logic(strategy, symbol, timeframe, param1, param2)
                     elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
-                    elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3)
+                    elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3, self.strategy_params.get('scalper_ema', 21))
                     elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, symbol, timeframe)
                     elif strategy == "ICT Gold Scalping": self.run_ict_gold_scalping_logic(strategy, symbol, timeframe)
                 except Exception as e:
@@ -239,25 +240,25 @@ class BackendWorker(QRunnable):
             if prev_close > prev_signal_ma and curr_close < signal_ma:
                 self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
 
-    def run_gold_scalper_logic(self, strategy, symbol, max_spread):
+    def run_gold_scalper_logic(self, strategy, symbol, max_spread, ema_period):
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info: return
         if symbol_info.spread > max_spread: self.signals.update_status.emit(f"Scalper: Spread too high ({symbol_info.spread}). Waiting...", "orange"); return
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
-        if rates is None or len(rates) < 22: return
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 250) # Need more history for larger EMAs
+        if rates is None or len(rates) < ema_period + 1: return
         close_prices = np.array([r['close'] for r in rates])
         rsi_values = calculate_rsi(close_prices, 14)
         if len(rsi_values) < 2: return
         current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
         current_price = close_prices[-1]
-        ema21 = calculate_ema(close_prices, 21)
-        if ema21 is None:
-            self.signals.update_status.emit(f"Scalper: Not enough data for EMA21.", "orange")
+        ema_val = calculate_ema(close_prices, ema_period)
+        if ema_val is None:
+            self.signals.update_status.emit(f"Scalper: Not enough data for EMA{ema_period}.", "orange")
             return
-        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f}, EMA21={ema21:.2f}, RSI={current_rsi:.2f}", "cyan")
-        if current_price > ema21 and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
+        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f}, EMA{ema_period}={ema_val:.2f}, RSI={current_rsi:.2f}", "cyan")
+        if current_price > ema_val and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
             self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
-        elif current_price < ema21 and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
+        elif current_price < ema_val and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
             self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
 
     def run_ict_trader_logic(self, strategy, symbol, timeframe):
@@ -436,6 +437,52 @@ class BackendWorker(QRunnable):
         return # No setup found
 
 
+
+# --- Scalper Settings Dialog ---
+class ScalperSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gold M5 Scalper Settings")
+        self.setModal(True)
+        self.layout = QVBoxLayout(self)
+        self.setFixedSize(300, 180)
+        self.setStyleSheet("""
+            QDialog { background-color: #252525; color: white; border: 1px solid #444; }
+            QLabel { color: #e0e0e0; font-weight: bold; font-size: 10pt; }
+            QComboBox { background-color: #333; color: white; padding: 5px; border: 1px solid #555; border-radius: 4px; }
+            QComboBox:hover { border: 1px solid #4CAF50; }
+            QPushButton { background-color: #4CAF50; color: white; padding: 8px; border: none; border-radius: 4px; font-weight: bold; }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton[text="Cancel"] { background-color: #d32f2f; }
+            QPushButton[text="Cancel"]:hover { background-color: #b71c1c; }
+        """)
+
+        form_layout = QFormLayout()
+        form_layout.setSpacing(15)
+        
+        self.risk_combo = QComboBox()
+        self.risk_combo.addItems(["Low", "Medium", "High"])
+        self.risk_combo.setCurrentText("Medium")
+        form_layout.addRow("Risk Level:", self.risk_combo)
+        
+        self.ema_combo = QComboBox()
+        self.ema_combo.addItems(["21", "50", "100", "200"])
+        self.ema_combo.setCurrentText("21")
+        form_layout.addRow("EMA Trend Filter:", self.ema_combo)
+        
+        self.layout.addLayout(form_layout)
+        self.layout.addStretch()
+        
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.layout.addWidget(self.buttons)
+
+    def get_settings(self):
+        return {
+            "risk": self.risk_combo.currentText(),
+            "ema": int(self.ema_combo.currentText())
+        }
 
 # --- Custom Title Bar ---
 class CustomTitleBar(QWidget):
@@ -871,6 +918,10 @@ class MainWindow(QMainWindow):
                 if self.param1_input.isEnabled(): params['param1'] = int(self.param1_input.text())
                 if self.param2_input.isEnabled(): params['param2'] = int(self.param2_input.text())
                 if self.param3_input.isEnabled(): params['param3'] = int(self.param3_input.text())
+                
+                # Include Scalper EMA if set, default to 21
+                params['scalper_ema'] = getattr(self, 'scalper_ema', 21)
+
             except (ValueError, TypeError, KeyError):
                 self.show_message("Error", "Invalid values in Strategy Settings. Ensure time is HH:MM.")
                 return
@@ -893,7 +944,13 @@ class MainWindow(QMainWindow):
         is_ict_scalper = (strategy == "ICT Gold Scalping")
 
         self.timeframe_combo.setEnabled(not is_scalper)
-        if is_scalper: self.timeframe_combo.setCurrentText("5 Minutes (M5)")
+        if is_scalper: 
+            self.timeframe_combo.setCurrentText("5 Minutes (M5)")
+            # Show popup if window is visible (user interaction)
+            if self.isVisible():
+                dialog = ScalperSettingsDialog(self)
+                if dialog.exec():
+                    self.apply_scalper_settings(dialog.get_settings())
 
         # Disable parameter inputs for ICT strategies
         params_enabled = not (is_scalper or is_ict or is_ict_scalper)
@@ -913,6 +970,22 @@ class MainWindow(QMainWindow):
             elif strategy == "Trend Following":
                 self.param1_label.setText("Signal MA Period:")
                 self.param2_label.setText("Trend MA Period:")
+
+    def apply_scalper_settings(self, settings):
+        # Store EMA for the worker (default 21)
+        self.scalper_ema = settings['ema']
+        
+        # Apply Risk to GUI fields
+        risk = settings['risk']
+        if risk == "Low":
+            self.tp_input.setText("1.5")
+            self.sl_input.setText("1.0")
+        elif risk == "Medium":
+            self.tp_input.setText("3.0")
+            self.sl_input.setText("2.0")
+        elif risk == "High":
+            self.tp_input.setText("6.0")
+            self.sl_input.setText("4.0")
 
     def closeEvent(self, event):
         self.worker.autotrade_enabled = False
