@@ -9,8 +9,8 @@ import MetaTrader5 as mt5
 import numpy as np
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QLabel, QPushButton, QLineEdit, QComboBox, QGroupBox, QTabWidget, QTableView,
-                             QAbstractItemView, QHeaderView, QMessageBox)
-from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, Slot
+                             QAbstractItemView, QHeaderView, QMessageBox, QSizeGrip, QFrame)
+from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, Slot, Qt, QPoint, QSize
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QColor
 
 # --- Indicator Functions (No changes) ---
@@ -437,13 +437,112 @@ class BackendWorker(QRunnable):
 
 
 
+# --- Custom Title Bar ---
+class CustomTitleBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setFixedHeight(40)
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(10, 0, 10, 0)
+        self.layout.setSpacing(10)
+        
+        # Title
+        self.title_label = QLabel("Gold EA Trading Bot")
+        self.title_label.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 12pt; border: none;")
+        self.layout.addWidget(self.title_label)
+        self.layout.addStretch()
+
+        # Buttons
+        button_style = """
+            QPushButton {
+                background-color: transparent; 
+                color: #bbbbbb; 
+                border: none; 
+                font-weight: bold; 
+                font-size: 12pt;
+                width: 30px;
+                height: 30px;
+            }
+            QPushButton:hover { background-color: #444; color: white; border-radius: 4px; }
+        """
+        close_style = """
+            QPushButton {
+                background-color: transparent; 
+                color: #bbbbbb; 
+                border: none; 
+                font-weight: bold; 
+                font-size: 12pt;
+                width: 30px;
+                height: 30px;
+            }
+            QPushButton:hover { background-color: #d32f2f; color: white; border-radius: 4px; }
+        """
+
+        self.minimize_btn = QPushButton("-")
+        self.minimize_btn.setStyleSheet(button_style)
+        self.minimize_btn.clicked.connect(self.minimize_window)
+        self.layout.addWidget(self.minimize_btn)
+
+        self.maximize_btn = QPushButton("□")
+        self.maximize_btn.setStyleSheet(button_style)
+        self.maximize_btn.clicked.connect(self.maximize_restore_window)
+        self.layout.addWidget(self.maximize_btn)
+
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setStyleSheet(close_style)
+        self.close_btn.clicked.connect(self.close_window)
+        self.layout.addWidget(self.close_btn)
+
+        self.start = QPoint(0, 0)
+        self.pressing = False
+
+    def minimize_window(self):
+        self.parent.showMinimized()
+
+    def maximize_restore_window(self):
+        if self.parent.isMaximized():
+            self.parent.showNormal()
+            self.maximize_btn.setText("□")
+        else:
+            self.parent.showMaximized()
+            self.maximize_btn.setText("❐")
+
+    def close_window(self):
+        self.parent.close()
+
+    def mousePressEvent(self, event):
+        self.start = self.mapToGlobal(event.pos())
+        self.pressing = True
+
+    def mouseMoveEvent(self, event):
+        if self.pressing:
+            end = self.mapToGlobal(event.pos())
+            movement = end - self.start
+            self.parent.setGeometry(self.parent.x() + movement.x(),
+                                  self.parent.y() + movement.y(),
+                                  self.parent.width(),
+                                  self.parent.height())
+            self.start = end
+
+    def mouseReleaseEvent(self, event):
+        self.pressing = False
+
 # --- Main Window Class ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Gold EA Trading Bot")
         self.setGeometry(100, 100, 900, 800)
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
         self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1e1e1e;
+                border: 1px solid #444;
+                border-radius: 5px;
+            }
             QWidget { background-color: #1e1e1e; color: white; font-size: 11pt; }
             QGroupBox { border: 1px solid #4CAF50; margin-top: 1em; font-weight: bold; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
@@ -453,7 +552,7 @@ class MainWindow(QMainWindow):
                 color: #777;
                 border-color: #444;
             }
-            QTableView { background-color: #333; gridline-color: #454545; }
+            QTableView { background-color: #333; gridline-color: #454545; border: none; }
             QHeaderView::section { background-color: #2a2a2a; border: 1px solid #555; padding: 4px; font-weight: bold; }
             QTabBar::tab { background: #333; padding: 10px; font-weight: bold; border-top-left-radius: 4px; border-top-right-radius: 4px; }
             QTabBar::tab:selected { background: #4CAF50; }
@@ -461,6 +560,9 @@ class MainWindow(QMainWindow):
             QPushButton#buyButton:hover, QPushButton#startButton:hover { background-color: #218838; }
             QPushButton#sellButton, QPushButton#stopButton { background-color: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
             QPushButton#sellButton:hover, QPushButton#stopButton:hover { background-color: #c82333; }
+            #contentWidget {
+                border-top: 1px solid #333;
+            }
         """)
         
         self.open_positions_model = QStandardItemModel()
@@ -471,9 +573,28 @@ class MainWindow(QMainWindow):
         self._start_backend()
 
     def _create_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        layout = QVBoxLayout(main_widget)
+        # Main container
+        container = QWidget()
+        container.setObjectName("MainContainer")
+        self.setCentralWidget(container)
+
+        # Main layout (Title Bar + Content)
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Custom Title Bar
+        self.title_bar = CustomTitleBar(self)
+        main_layout.addWidget(self.title_bar)
+
+        # Content Widget
+        content_widget = QWidget()
+        content_widget.setObjectName("contentWidget")
+        main_layout.addWidget(content_widget)
+
+        # Content Layout
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(15, 15, 15, 15)
 
         self.status_label = QLabel("Connecting to MetaTrader 5..."); self.status_label.setStyleSheet("color: yellow;")
         layout.addWidget(self.status_label)
@@ -531,6 +652,15 @@ class MainWindow(QMainWindow):
         closed_layout = QVBoxLayout(closed_tab); closed_layout.addWidget(self.closed_view)
         
         layout.addWidget(tabs)
+
+        # Resize Grip
+        grip_layout = QHBoxLayout()
+        grip_layout.setContentsMargins(0, 0, 0, 0) # Compact
+        grip_layout.addStretch()
+        self.size_grip = QSizeGrip(self)
+        self.size_grip.setStyleSheet("width: 20px; height: 20px; background: transparent;") # Ensure it's visible but subtle
+        grip_layout.addWidget(self.size_grip)
+        main_layout.addLayout(grip_layout)
 
     def setup_table_view(self, view, model, headers):
         model.setHorizontalHeaderLabels(headers)
