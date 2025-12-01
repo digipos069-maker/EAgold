@@ -544,9 +544,44 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
             }
             QWidget { background-color: #1e1e1e; color: white; font-size: 11pt; }
-            QGroupBox { border: 1px solid #4CAF50; margin-top: 1em; font-weight: bold; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
-            QLineEdit, QComboBox { background-color: #333; border: 1px solid #555; padding: 5px; border-radius: 3px; }
+            
+            /* --- Group Box (Sections) --- */
+            QGroupBox {
+                background-color: #252525;
+                border: 1px solid #3d3d3d;
+                border-radius: 8px;
+                margin-top: 1.2em; /* Leave space for title */
+                padding-top: 15px; /* Push content down */
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 15px;
+                padding: 0 5px;
+                color: #4CAF50; /* Accent color for titles */
+                font-size: 11pt;
+                font-weight: bold;
+                background-color: #1e1e1e; /* Matches main bg to look like it floats */
+            }
+
+            /* --- Inputs & Combo Boxes --- */
+            QLineEdit, QComboBox {
+                background-color: #1a1a1a;
+                border: 1px solid #444;
+                padding: 8px 10px; /* More padding */
+                border-radius: 4px;
+                color: #eee;
+                font-size: 10pt;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #4CAF50;
+                background-color: #151515;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 25px;
+            }
             QComboBox:disabled, QLineEdit:disabled {
                 background-color: #2a2a2a;
                 color: #777;
