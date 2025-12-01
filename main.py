@@ -552,10 +552,82 @@ class MainWindow(QMainWindow):
                 color: #777;
                 border-color: #444;
             }
-            QTableView { background-color: #333; gridline-color: #454545; border: none; }
-            QHeaderView::section { background-color: #2a2a2a; border: 1px solid #555; padding: 4px; font-weight: bold; }
-            QTabBar::tab { background: #333; padding: 10px; font-weight: bold; border-top-left-radius: 4px; border-top-right-radius: 4px; }
-            QTabBar::tab:selected { background: #4CAF50; }
+            
+            /* --- Modern Table Styling --- */
+            QTableView {
+                background-color: #1e1e1e;
+                alternate-background-color: #252525;
+                selection-background-color: #3d3d3d;
+                selection-color: #ffffff;
+                border: 1px solid #333;
+                border-radius: 4px;
+                gridline-color: #333;
+                outline: 0; /* Remove dotted focus line */
+            }
+            QTableView::item {
+                padding: 5px;
+                border: none;
+            }
+            QTableView::item:selected {
+                background-color: #3d3d3d;
+                color: #ffffff;
+            }
+            
+            /* Header Styling */
+            QHeaderView::section {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                padding: 8px;
+                border: none;
+                border-bottom: 2px solid #444;
+                font-weight: bold;
+                font-size: 10pt;
+                text-transform: uppercase;
+            }
+
+            /* Scrollbar Styling */
+            QScrollBar:vertical {
+                border: none;
+                background: #1e1e1e;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #555;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #777;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+
+            /* Tab Widget Styling */
+            QTabWidget::pane {
+                border: 1px solid #333;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+            }
+            QTabBar::tab {
+                background: #252525;
+                color: #888;
+                padding: 10px 20px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: #4CAF50;
+                color: white;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #333;
+                color: #aaa;
+            }
+
             QPushButton#buyButton, QPushButton#startButton { background-color: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
             QPushButton#buyButton:hover, QPushButton#startButton:hover { background-color: #218838; }
             QPushButton#sellButton, QPushButton#stopButton { background-color: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
@@ -668,6 +740,12 @@ class MainWindow(QMainWindow):
         view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        # Modern Table Properties
+        view.setAlternatingRowColors(True)
+        view.setShowGrid(False)  # Cleaner look without grid lines
+        view.verticalHeader().setDefaultSectionSize(35) # Taller rows
+        view.setFocusPolicy(Qt.NoFocus) # Remove focus dotted line
 
     def _start_backend(self):
         self.threadpool = QThreadPool()
