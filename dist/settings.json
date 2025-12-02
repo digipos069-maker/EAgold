@@ -1,0 +1,13 @@
+{
+    "tp": "6.0",
+    "sl": "4.0",
+    "max_pos": "5",
+    "strategy": "Gold M5 Scalper",
+    "timeframe": "5 Minutes (M5)",
+    "start_time": "00:00",
+    "end_time": "23:59",
+    "param1": "10",
+    "param2": "50",
+    "param3": "160",
+    "scalper_ema": 200
+}

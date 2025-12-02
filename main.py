@@ -4,6 +4,8 @@ import time
 from datetime import datetime, timezone
 import queue
 import signal
+import json
+import os
 
 import MetaTrader5 as mt5
 import numpy as np
@@ -444,45 +446,137 @@ class ScalperSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Gold M5 Scalper Settings")
         self.setModal(True)
-        self.layout = QVBoxLayout(self)
-        self.setFixedSize(300, 180)
-        self.setStyleSheet("""
-            QDialog { background-color: #252525; color: white; border: 1px solid #444; }
-            QLabel { color: #e0e0e0; font-weight: bold; font-size: 10pt; }
-            QComboBox { background-color: #333; color: white; padding: 5px; border: 1px solid #555; border-radius: 4px; }
-            QComboBox:hover { border: 1px solid #4CAF50; }
-            QPushButton { background-color: #4CAF50; color: white; padding: 8px; border: none; border-radius: 4px; font-weight: bold; }
-            QPushButton:hover { background-color: #45a049; }
-            QPushButton[text="Cancel"] { background-color: #d32f2f; }
-            QPushButton[text="Cancel"]:hover { background-color: #b71c1c; }
+        self.setFixedSize(300, 200)
+        
+        # Make the dialog frameless and translucent
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main layout for the dialog (holds the styled frame)
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.setSpacing(0)
+
+        # Background Frame (This will be the visible window)
+        self.bg_frame = QFrame()
+        self.bg_frame.setObjectName("bgFrame")
+        self.bg_frame.setStyleSheet("""
+            QFrame#bgFrame {
+                background-color: #252525;
+                border: 1px solid #4CAF50;
+                border-radius: 8px;
+            }
         """)
+        dialog_layout.addWidget(self.bg_frame)
+
+        # Layout inside the frame
+        self.main_layout = QVBoxLayout(self.bg_frame)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        # Custom Title Bar Widget
+        self.title_bar_widget = QWidget()
+        self.title_bar_widget.setFixedHeight(30)
+        self.title_bar_widget.setStyleSheet("""
+            background-color: #1e1e1e;
+            border-bottom: 1px solid #333;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+        """)
+        
+        title_bar_layout = QHBoxLayout(self.title_bar_widget)
+        title_bar_layout.setContentsMargins(10, 0, 5, 0)
+        title_bar_layout.setSpacing(5)
+        
+        self.dialog_title_label = QLabel("Gold M5 Scalper Settings")
+        self.dialog_title_label.setStyleSheet("color: #e0e0e0; font-weight: bold; font-size: 10pt; border: none; background: transparent;")
+        title_bar_layout.addWidget(self.dialog_title_label)
+        title_bar_layout.addStretch()
+
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(25, 25)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; 
+                color: #bbbbbb; 
+                border: none; 
+                font-weight: bold; 
+                font-size: 10pt;
+            }
+            QPushButton:hover { background-color: #d32f2f; color: white; border-radius: 4px; }
+        """)
+        self.close_btn.clicked.connect(self.reject)
+        title_bar_layout.addWidget(self.close_btn)
+        
+        self.main_layout.addWidget(self.title_bar_widget)
+
+        # Content area
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 15, 20, 15)
+        content_layout.setSpacing(15)
 
         form_layout = QFormLayout()
-        form_layout.setSpacing(15)
+        form_layout.setSpacing(10)
         
         self.risk_combo = QComboBox()
         self.risk_combo.addItems(["Low", "Medium", "High"])
         self.risk_combo.setCurrentText("Medium")
-        form_layout.addRow("Risk Level:", self.risk_combo)
+        self.risk_combo.setStyleSheet("background-color: #1a1a1a; color: white; padding: 5px; border: 1px solid #444; border-radius: 4px;")
+        label_risk = QLabel("Risk Level:")
+        label_risk.setStyleSheet("color: #e0e0e0; font-weight: bold; border: none; background: transparent;")
+        form_layout.addRow(label_risk, self.risk_combo)
         
         self.ema_combo = QComboBox()
         self.ema_combo.addItems(["21", "50", "100", "200"])
         self.ema_combo.setCurrentText("21")
-        form_layout.addRow("EMA Trend Filter:", self.ema_combo)
+        self.ema_combo.setStyleSheet("background-color: #1a1a1a; color: white; padding: 5px; border: 1px solid #444; border-radius: 4px;")
+        label_ema = QLabel("EMA Trend Filter:")
+        label_ema.setStyleSheet("color: #e0e0e0; font-weight: bold; border: none; background: transparent;")
+        form_layout.addRow(label_ema, self.ema_combo)
         
-        self.layout.addLayout(form_layout)
-        self.layout.addStretch()
+        content_layout.addLayout(form_layout)
         
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.setStyleSheet("""
+            QPushButton { background-color: #4CAF50; color: white; padding: 6px 15px; border: none; border-radius: 4px; font-weight: bold; }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton[text="Cancel"] { background-color: #d32f2f; }
+            QPushButton[text="Cancel"]:hover { background-color: #b71c1c; }
+        """)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
-        self.layout.addWidget(self.buttons)
+        content_layout.addWidget(self.buttons)
+
+        self.main_layout.addWidget(content_widget)
+
+        # Dragging logic
+        self.start_pos = QPoint(0, 0)
+        self.dragging = False
 
     def get_settings(self):
         return {
             "risk": self.risk_combo.currentText(),
             "ema": int(self.ema_combo.currentText())
         }
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Check if click is within title bar height (approx 30px + window margins)
+            if event.position().y() <= 40:
+                self.start_pos = event.globalPosition().toPoint() - self.pos()
+                self.dragging = True
+                event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging:
+            self.move(event.globalPosition().toPoint() - self.start_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+            event.accept()
 
 # --- Custom Title Bar ---
 class CustomTitleBar(QWidget):
@@ -725,6 +819,7 @@ class MainWindow(QMainWindow):
 
         self._create_ui()
         self._start_backend()
+        self.load_settings()
 
     def _create_ui(self):
         # Main container
@@ -946,8 +1041,10 @@ class MainWindow(QMainWindow):
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: 
             self.timeframe_combo.setCurrentText("5 Minutes (M5)")
-            # Show popup if window is visible (user interaction)
-            if self.isVisible():
+            # Check if sender is the combobox to avoid popup on startup or programmatic changes not by user
+            # But since update_ui_for_strategy is manually called in init, we can just check if window has been shown
+            # or simpler, just show it. Users usually won't see it on startup because default is not Scalper.
+            if self.sender() == self.strategy_combo:
                 dialog = ScalperSettingsDialog(self)
                 if dialog.exec():
                     self.apply_scalper_settings(dialog.get_settings())
@@ -987,7 +1084,69 @@ class MainWindow(QMainWindow):
             self.tp_input.setText("6.0")
             self.sl_input.setText("4.0")
 
+    def get_config_path(self):
+        # If running as exe, look in the same folder as the exe
+        if getattr(sys, 'frozen', False):
+            application_path = os.path.dirname(sys.executable)
+        else:
+            application_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(application_path, 'settings.json')
+
+    def save_settings(self):
+        settings = {
+            "tp": self.tp_input.text(),
+            "sl": self.sl_input.text(),
+            "max_pos": self.max_pos_input.text(),
+            "strategy": self.strategy_combo.currentText(),
+            "timeframe": self.timeframe_combo.currentText(),
+            "start_time": self.start_time_input.text(),
+            "end_time": self.end_time_input.text(),
+            "param1": self.param1_input.text(),
+            "param2": self.param2_input.text(),
+            "param3": self.param3_input.text(),
+            # Save scalper settings if they exist
+            "scalper_ema": getattr(self, 'scalper_ema', 21)
+        }
+        try:
+            with open(self.get_config_path(), 'w') as f:
+                json.dump(settings, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save settings: {e}")
+
+    def load_settings(self):
+        path = self.get_config_path()
+        if not os.path.exists(path):
+            return
+        
+        try:
+            with open(path, 'r') as f:
+                settings = json.load(f)
+                
+            if "tp" in settings: self.tp_input.setText(settings["tp"])
+            if "sl" in settings: self.sl_input.setText(settings["sl"])
+            if "max_pos" in settings: self.max_pos_input.setText(settings["max_pos"])
+            if "timeframe" in settings: self.timeframe_combo.setCurrentText(settings["timeframe"])
+            if "start_time" in settings: self.start_time_input.setText(settings["start_time"])
+            if "end_time" in settings: self.end_time_input.setText(settings["end_time"])
+            if "param1" in settings: self.param1_input.setText(settings["param1"])
+            if "param2" in settings: self.param2_input.setText(settings["param2"])
+            if "param3" in settings: self.param3_input.setText(settings["param3"])
+            if "scalper_ema" in settings: self.scalper_ema = settings["scalper_ema"]
+            
+            # Set strategy last to trigger UI updates, but avoid popup during load
+            if "strategy" in settings: 
+                # Temporarily block signals to prevent popup during loading
+                self.strategy_combo.blockSignals(True)
+                self.strategy_combo.setCurrentText(settings["strategy"])
+                self.strategy_combo.blockSignals(False)
+                # Manually update UI without triggering the popup logic (which checks sender)
+                self.update_ui_for_strategy()
+            
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+
     def closeEvent(self, event):
+        self.save_settings()
         self.worker.autotrade_enabled = False
         mt5.shutdown()
         event.accept()
