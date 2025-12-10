@@ -103,6 +103,34 @@ def calculate_macd(close, fast=12, slow=26, signal=9):
     histogram = macd_line - signal_line
     return macd_line[-1], signal_line[-1], histogram[-1], histogram[-2]
 
+def calculate_stochastic(high, low, close, k_period=5, d_period=3, slowing=3):
+    if len(close) < k_period + d_period + slowing: return None, None
+    
+    # Calculate %K Line
+    lowest_low = np.zeros(len(low))
+    highest_high = np.zeros(len(high))
+    
+    for i in range(k_period - 1, len(low)):
+        lowest_low[i] = np.min(low[i - k_period + 1:i + 1])
+        highest_high[i] = np.max(high[i - k_period + 1:i + 1])
+        
+    denom = highest_high - lowest_low
+    denom[denom == 0] = 1e-9 # Avoid div by zero
+    
+    raw_k = 100 * ((close - lowest_low) / denom)
+    
+    # Apply Slowing to %K
+    k_line = np.zeros(len(raw_k))
+    for i in range(slowing - 1, len(raw_k)):
+        k_line[i] = np.mean(raw_k[i - slowing + 1:i + 1])
+        
+    # Calculate %D Line (SMA of %K)
+    d_line = np.zeros(len(k_line))
+    for i in range(d_period - 1, len(k_line)):
+        d_line[i] = np.mean(k_line[i - d_period + 1:i + 1])
+        
+    return k_line[-1], d_line[-1]
+
 # --- Worker Signals ---
 class WorkerSignals(QObject):
     update_status = Signal(str, str)
@@ -658,9 +686,19 @@ class BackendWorker(QRunnable):
 
         # M5
         m5_close = np.array([r['close'] for r in m5_rates])
+        m5_high = np.array([r['high'] for r in m5_rates])
+        m5_low = np.array([r['low'] for r in m5_rates])
+        m5_open = np.array([r['open'] for r in m5_rates])
+        
         m5_rsi = calculate_rsi(m5_close, 14)
-        if len(m5_rsi) < 1: return
+        m5_stoch_k, m5_stoch_d = calculate_stochastic(m5_high, m5_low, m5_close, 5, 3, 3)
+        
+        if len(m5_rsi) < 1 or m5_stoch_k is None: return
         current_m5_rsi = m5_rsi[-1]
+        
+        # Candle Color (Price Action)
+        is_bullish_candle = m5_close[-1] > m5_open[-1]
+        is_bearish_candle = m5_close[-1] < m5_open[-1]
 
         current_price = m15_close[-1]
 
@@ -671,22 +709,22 @@ class BackendWorker(QRunnable):
         # Entry Conditions
         signal = None
         
-        # Optional: Check Spread (assuming fixed max 300 points for now or from params if needed)
-        # symbol_info = mt5.symbol_info(symbol)
-        # if symbol_info and symbol_info.spread > 300: return
-
-        self.signals.update_status.emit(f"Gold New: Price={current_price:.2f} | Bias={bias} | ADX={m15_adx:.1f} | RSI(M5)={current_m5_rsi:.1f}", "cyan")
+        self.signals.update_status.emit(f"Gold New: Price={current_price:.2f} | Bias={bias} | ADX={m15_adx:.1f} | Stoch K/D={m5_stoch_k:.1f}/{m5_stoch_d:.1f}", "cyan")
 
         if bias == "Long":
             # 1. Price above EMA50 on M15
             if current_price > m15_ema50:
                 # 2. MACD Histogram flip positive (now > 0, prev <= 0)
                 if hist > 0 and prev_hist <= 0:
-                    # 3. ADX > 18
+                    # 3. ADX > 18 (Trend Strength)
                     if m15_adx > 18:
                         # 4. RSI M5 in 40-80
                         if 40 <= current_m5_rsi <= 80:
-                             signal = "Buy"
+                            # 5. EXPERT: Stochastic < 80 (Not exhausted) AND Crossing UP
+                            if m5_stoch_k < 80 and m5_stoch_k > m5_stoch_d:
+                                # 6. EXPERT: Bullish Candle Confirmation
+                                if is_bullish_candle:
+                                    signal = "Buy"
 
         elif bias == "Short":
             # 1. Price below EMA50 on M15
@@ -697,7 +735,11 @@ class BackendWorker(QRunnable):
                     if m15_adx > 18:
                          # 4. RSI M5 in 20-60
                         if 20 <= current_m5_rsi <= 60:
-                            signal = "Sell"
+                            # 5. EXPERT: Stochastic > 20 (Not exhausted) AND Crossing DOWN
+                            if m5_stoch_k > 20 and m5_stoch_k < m5_stoch_d:
+                                # 6. EXPERT: Bearish Candle Confirmation
+                                if is_bearish_candle:
+                                    signal = "Sell"
 
         # 4. Execution
         if signal:
