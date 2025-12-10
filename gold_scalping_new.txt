@@ -1,0 +1,112 @@
+You are an expert algorithmic trading system designer.  
+please add new strategy to my EA detailed EA (Expert Advisor) trading strategy for XAUUSD (gold) based on the following requirements.  
+I want the EA logic, technical analysis rules, entry/exit rules, scaling-in logic, risk management, and pseudocode.
+
+-------------------------
+### EA GOAL
+A robust short-term trend-following + pullback scaling system for GOLD (XAU/USD), combining the techniques expert gold traders use.
+
+-------------------------
+### TECHNICAL ANALYSIS COMBINATION
+Use all these indicators:
+- EMA200 on H1 (trend bias filter)
+- EMA50 on M15 (medium trend)
+- MACD (12,26,9) on M15 (momentum confirmation)
+- RSI(14) on M5 (entry timing filter)
+- ATR(14) on M15 (stop & scaling distance)
+- ADX(14) on M15 (trend-strength filter)
+- Optional Bollinger Bands (20,2) for avoiding false breakout entries
+
+Multi-timeframe requirement:
+- H1 gives trend bias.
+- M15 gives entry direction and primary confirmation.
+- M5 confirms momentum & avoids overbought/oversold traps.
+
+-------------------------
+### ENTRY RULES
+Only trade in direction of EMA200(H1) trend.
+Entry conditions:
+1. Price above/below EMA50 on M15 in the direction of bias.
+2. MACD histogram on M15 flips positive (long) or negative (short).
+3. ADX(14) on M15 > 18.
+4. RSI(14) on M5 is not extreme (long: 40–80, short: 20–60).
+5. Spread <= allowed threshold.
+
+Entry order = market order.
+
+-------------------------
+### INITIAL STOP-LOSS & TAKE-PROFIT
+Initial stop-loss = 1.5 × ATR(14) on M15.
+Initial TP = 1 × ATR or use trailing logic.
+
+-------------------------
+### SCALING / PYRAMID LOGIC
+Enable a maximum of 3 legs total.
+Each new leg added only if:
+- Price moves in favor by 0.6 × ATR from previous entry,
+- MACD still supports direction,
+- ADX rising or at least stable,
+- Spread still acceptable,
+- Combined risk remains within limits.
+
+Lot distribution example:
+- Leg 1 = 50% of total planned risk
+- Leg 2 = 30%
+- Leg 3 = 20%
+
+After each added leg:
+- Recalculate average entry price.
+- Update combined stop-loss = avg price minus 1.2 × ATR (for long).
+- Move stop to breakeven when possible.
+
+-------------------------
+### EXIT LOGIC
+Take partial profit:
+- At +1.5 × ATR: close 50% of current position.
+- Move stop-loss to breakeven + buffer.
+
+Final exit:
+- ATR-based trailing stop (1 × ATR).
+- Or full TP at +3 × ATR.
+- Or reverse signal if needed.
+
+-------------------------
+### RISK MANAGEMENT
+Use fixed fractional risk:  
+Total risk per full trade = 1% of account (all legs combined).
+Daily max loss = 3%, after which EA stops trading.
+Weekly max drawdown cap optional.
+
+Position sizing:
+lots = (risk_usd) / (SL_distance × pip_value)
+
+-------------------------
+### SPREAD, SLIPPAGE, AND NEWS FILTERS
+- Do not trade if spread > threshold.
+- Do not open positions ± 30 minutes around high-impact news.
+- Use slippage tolerance; cancel order if slippage too large.
+
+-------------------------
+### FULL PSEUDOCODE STRUCTURE
+Please generate:
+- Full pseudocode for EA
+- All indicator calls
+- Order management system
+- Scaling manager
+- Trailing-stop manager
+- Risk manager
+- News filter logic
+- Spread check logic
+- Logging system
+
+-------------------------
+### OUTPUT FORMAT
+Provide:
+1. A complete explanation of the system
+2. A clear list of all rules
+3. Full pseudocode (ready to convert to MQL5)
+4. Parameter table with recommended values & optimization ranges
+5. Notes on backtesting & walk-forward optimization
+-------------------------
+
+Generate the full response now.

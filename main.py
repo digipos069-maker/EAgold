@@ -40,6 +40,69 @@ def calculate_ema(prices, period):
     if len(prices) < period: return None
     return np.mean(prices[-period:])
 
+def calculate_atr(high, low, close, period=14):
+    if len(close) < period + 1: return None
+    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
+    # First ATR is simple average
+    atr = np.zeros(len(tr))
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    return atr[-1]
+
+def calculate_adx(high, low, close, period=14):
+    if len(close) < period * 2: return None
+    up = high[1:] - high[:-1]
+    down = low[:-1] - low[1:]
+    
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    
+    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
+    
+    # Smooth TR, +DM, -DM
+    def smooth(data, period):
+        smoothed = np.zeros(len(data))
+        smoothed[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1]/period) + data[i]
+        return smoothed
+
+    tr_s = smooth(tr, period)
+    plus_dm_s = smooth(plus_dm, period)
+    minus_dm_s = smooth(minus_dm, period)
+    
+    # Avoid division by zero
+    tr_s[tr_s == 0] = 1e-9
+    
+    plus_di = 100 * (plus_dm_s / tr_s)
+    minus_di = 100 * (minus_dm_s / tr_s)
+    
+    sum_di = plus_di + minus_di
+    sum_di[sum_di == 0] = 1e-9
+    
+    dx = 100 * np.abs(plus_di - minus_di) / sum_di
+    adx = smooth(dx, period)
+    return adx[-1]
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    if len(close) < slow + signal: return None, None, None, None
+    
+    def get_ema_series(prices, period):
+        ema = np.zeros(len(prices))
+        ema[period-1] = np.mean(prices[:period])
+        multiplier = 2 / (period + 1)
+        for i in range(period, len(prices)):
+            ema[i] = (prices[i] - ema[i-1]) * multiplier + ema[i-1]
+        return ema
+
+    ema_fast = get_ema_series(close, fast)
+    ema_slow = get_ema_series(close, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = get_ema_series(macd_line, signal)
+    histogram = macd_line - signal_line
+    return macd_line[-1], signal_line[-1], histogram[-1], histogram[-2]
+
 # --- Worker Signals ---
 class WorkerSignals(QObject):
     update_status = Signal(str, str)
@@ -123,7 +186,7 @@ class BackendWorker(QRunnable):
                 print(f"Error in history sync: {e}")
             time.sleep(5)
 
-    def execute_trade(self, trade_type, is_auto=False, sl_price=None, tp_price=None):
+    def execute_trade(self, trade_type, is_auto=False, sl_price=None, tp_price=None, volume=0.01):
         try:
             max_pos = self.strategy_params['max_pos']
             open_positions = mt5.positions_get(magic=234000)
@@ -136,7 +199,6 @@ class BackendWorker(QRunnable):
             self.signals.show_message.emit("Error", "Invalid Risk Management values.")
             return
 
-        lot_size = 0.01
         tick = mt5.symbol_info_tick(self.symbol)
         if not tick:
             self.signals.show_message.emit("Error", f"Could not get price for {self.symbol}")
@@ -148,7 +210,7 @@ class BackendWorker(QRunnable):
         sl = sl_price if sl_price is not None else (price - sl_val if trade_type == "Buy" else price + sl_val)
         tp = tp_price if tp_price is not None else (price + tp_val if trade_type == "Buy" else price - tp_val)
 
-        request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": lot_size, "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
+        request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": float(volume), "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
         result = mt5.order_send(request)
         
         position_id = None
@@ -202,6 +264,7 @@ class BackendWorker(QRunnable):
                     elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, self.symbol, param3, self.strategy_params.get('scalper_ema', 21))
                     elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, self.symbol, timeframe)
                     elif strategy == "ICT Gold Scalping": self.run_ict_gold_scalping_logic(strategy, self.symbol, timeframe)
+                    elif strategy == "Gold Scalping New": self.run_gold_scalping_new_logic(strategy, self.symbol)
                 except Exception as e:
                     print(f"Error in strategy run: {e}")
                     self.signals.update_status.emit(f"Strategy Error: {e}", "red")
@@ -441,6 +504,119 @@ class BackendWorker(QRunnable):
                                 self.execute_trade("Buy", is_auto=True, sl_price=stop_loss_price)
                                 return # Exit after finding a trade
         return # No setup found
+
+    def run_gold_scalping_new_logic(self, strategy, symbol):
+        # 1. Fetch Data
+        # H1 for Trend Bias (EMA200)
+        h1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 205)
+        # M15 for Entry/Confirmation (EMA50, MACD, ADX, ATR)
+        m15_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 100)
+        # M5 for Momentum (RSI)
+        m5_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 20)
+
+        if h1_rates is None or m15_rates is None or m5_rates is None:
+            self.signals.update_status.emit("Gold Scalping New: Not enough data.", "orange")
+            return
+
+        # 2. Indicators
+        # H1
+        h1_close = np.array([r['close'] for r in h1_rates])
+        h1_ema200 = calculate_ema(h1_close, 200)
+        if h1_ema200 is None: return
+
+        # M15
+        m15_close = np.array([r['close'] for r in m15_rates])
+        m15_high = np.array([r['high'] for r in m15_rates])
+        m15_low = np.array([r['low'] for r in m15_rates])
+        
+        m15_ema50 = calculate_ema(m15_close, 50)
+        macd_line, signal_line, hist, prev_hist = calculate_macd(m15_close, 12, 26, 9)
+        m15_adx = calculate_adx(m15_high, m15_low, m15_close, 14)
+        m15_atr = calculate_atr(m15_high, m15_low, m15_close, 14)
+
+        if any(x is None for x in [m15_ema50, macd_line, m15_adx, m15_atr]): return
+
+        # M5
+        m5_close = np.array([r['close'] for r in m5_rates])
+        m5_rsi = calculate_rsi(m5_close, 14)
+        if len(m5_rsi) < 1: return
+        current_m5_rsi = m5_rsi[-1]
+
+        current_price = m15_close[-1]
+
+        # 3. Logic
+        # Bias
+        bias = "Long" if current_price > h1_ema200 else "Short"
+        
+        # Entry Conditions
+        signal = None
+        
+        # Optional: Check Spread (assuming fixed max 300 points for now or from params if needed)
+        # symbol_info = mt5.symbol_info(symbol)
+        # if symbol_info and symbol_info.spread > 300: return
+
+        self.signals.update_status.emit(f"Gold New: Price={current_price:.2f} | Bias={bias} | ADX={m15_adx:.1f} | RSI(M5)={current_m5_rsi:.1f}", "cyan")
+
+        if bias == "Long":
+            # 1. Price above EMA50 on M15
+            if current_price > m15_ema50:
+                # 2. MACD Histogram flip positive (now > 0, prev <= 0)
+                if hist > 0 and prev_hist <= 0:
+                    # 3. ADX > 18
+                    if m15_adx > 18:
+                        # 4. RSI M5 in 40-80
+                        if 40 <= current_m5_rsi <= 80:
+                             signal = "Buy"
+
+        elif bias == "Short":
+            # 1. Price below EMA50 on M15
+            if current_price < m15_ema50:
+                # 2. MACD Histogram flip negative (now < 0, prev >= 0)
+                if hist < 0 and prev_hist >= 0:
+                     # 3. ADX > 18
+                    if m15_adx > 18:
+                         # 4. RSI M5 in 20-60
+                        if 20 <= current_m5_rsi <= 60:
+                            signal = "Sell"
+
+        # 4. Execution
+        if signal:
+            # Calculate Volume (1% Risk)
+            calc_volume = 0.01
+            try:
+                account = mt5.account_info()
+                symbol_info = mt5.symbol_info(symbol)
+                if account and symbol_info:
+                    risk_per_trade = 0.01 * account.balance
+                    sl_dist = 1.5 * m15_atr
+                    contract_size = symbol_info.trade_contract_size
+                    
+                    if sl_dist > 0 and contract_size > 0:
+                        raw_volume = risk_per_trade / (sl_dist * contract_size)
+                        step = symbol_info.volume_step
+                        if step > 0:
+                            calc_volume = round(raw_volume / step) * step
+                            calc_volume = max(symbol_info.volume_min, min(symbol_info.volume_max, calc_volume))
+            except Exception as e:
+                self.signals.update_status.emit(f"Volume Calc Error: {e}", "red")
+
+            if signal == "Buy" and self.last_trade_action != "Buy":
+                 sl_dist = 1.5 * m15_atr
+                 tp_dist = 1.0 * m15_atr
+                 sl_price = current_price - sl_dist
+                 tp_price = current_price + tp_dist
+                 self.last_trade_action = "Buy"
+                 self.execute_trade("Buy", is_auto=True, sl_price=sl_price, tp_price=tp_price, volume=calc_volume)
+                 self.signals.update_status.emit(f"Gold Scalping New: Buy Signal. Vol={calc_volume:.2f}, SL={sl_price:.2f}", "green")
+
+            elif signal == "Sell" and self.last_trade_action != "Sell":
+                 sl_dist = 1.5 * m15_atr
+                 tp_dist = 1.0 * m15_atr
+                 sl_price = current_price + sl_dist
+                 tp_price = current_price - tp_dist
+                 self.last_trade_action = "Sell"
+                 self.execute_trade("Sell", is_auto=True, sl_price=sl_price, tp_price=tp_price, volume=calc_volume)
+                 self.signals.update_status.emit(f"Gold Scalping New: Sell Signal. Vol={calc_volume:.2f}, SL={sl_price:.2f}", "red")
 
 
 
@@ -876,7 +1052,7 @@ class MainWindow(QMainWindow):
 
         strat_box = QGroupBox("Strategy Settings")
         strat_layout = QGridLayout(strat_box)
-        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader", "ICT Gold Scalping"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
+        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader", "ICT Gold Scalping", "Gold Scalping New"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
         strat_layout.addWidget(QLabel("Strategy:"), 0, 0); strat_layout.addWidget(self.strategy_combo, 0, 1)
         self.timeframe_combo = QComboBox(); self.timeframe_combo.addItems(["1 Minute (M1)", "5 Minutes (M5)", "15 Minutes (M15)", "1 Hour (H1)", "4 Hours (H4)"])
         strat_layout.addWidget(QLabel("Timeframe:"), 0, 2); strat_layout.addWidget(self.timeframe_combo, 0, 3)
@@ -1074,6 +1250,7 @@ class MainWindow(QMainWindow):
         is_scalper = (strategy == "Gold M5 Scalper")
         is_ict = (strategy == "ICT Trader")
         is_ict_scalper = (strategy == "ICT Gold Scalping")
+        is_gold_new = (strategy == "Gold Scalping New")
 
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: 
@@ -1086,8 +1263,8 @@ class MainWindow(QMainWindow):
                 if dialog.exec():
                     self.apply_scalper_settings(dialog.get_settings())
 
-        # Disable parameter inputs for ICT strategies
-        params_enabled = not (is_scalper or is_ict or is_ict_scalper)
+        # Disable parameter inputs for ICT strategies and Gold Scalping New
+        params_enabled = not (is_scalper or is_ict or is_ict_scalper or is_gold_new)
         self.param1_label.setEnabled(params_enabled)
         self.param1_input.setEnabled(params_enabled)
         self.param2_label.setEnabled(params_enabled)
