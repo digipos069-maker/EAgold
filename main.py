@@ -344,7 +344,7 @@ class BackendWorker(QRunnable):
         
         # 1. H1 Trend Filter
         h1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 205)
-        h1_trend_bullish = True; h1_trend_bearish = True # Default true if no data, but better to be safe
+        h1_trend_bullish = True; h1_trend_bearish = True 
         h1_ema200 = 0.0
         
         if h1_rates is not None and len(h1_rates) >= 200:
@@ -362,30 +362,42 @@ class BackendWorker(QRunnable):
         close_prices = np.array([r['close'] for r in rates])
         high_prices = np.array([r['high'] for r in rates])
         low_prices = np.array([r['low'] for r in rates])
+        open_prices = np.array([r['open'] for r in rates])
 
         rsi_values = calculate_rsi(close_prices, 14)
         adx_val = calculate_adx(high_prices, low_prices, close_prices, 14)
+        stoch_k, stoch_d = calculate_stochastic(high_prices, low_prices, close_prices, 5, 3, 3)
         
-        if len(rsi_values) < 2 or adx_val is None: return
+        if len(rsi_values) < 2 or adx_val is None or stoch_k is None: return
         
         current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
         current_price = close_prices[-1]
         ema_val = calculate_ema(close_prices, ema_period)
         
+        # Candle Color
+        is_bullish_candle = close_prices[-1] > open_prices[-1]
+        is_bearish_candle = close_prices[-1] < open_prices[-1]
+        
         if ema_val is None:
             self.signals.update_status.emit(f"Scalper: Not enough data for EMA{ema_period}.", "orange")
             return
             
-        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f} | H1 EMA200={h1_ema200:.2f} | M5 EMA{ema_period}={ema_val:.2f} | RSI={current_rsi:.1f} | ADX={adx_val:.1f}", "cyan")
+        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f} | H1 EMA={h1_ema200:.2f} | ADX={adx_val:.1f} | Stoch K/D={stoch_k:.1f}/{stoch_d:.1f}", "cyan")
         
-        # Logic: Trend (H1) + Trend (M5) + Volatility (ADX) + Momentum (RSI Dip)
+        # Logic: Trend (H1 & M5) + Volatility (ADX) + Momentum (RSI Dip) + Trigger (Stoch + Candle)
         if h1_trend_bullish and current_price > ema_val and adx_val > 20:
-            if prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
-                self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
+            # RSI Dip Buy + Stoch Cross Up + Bullish Candle
+            if prev_rsi < 30 and current_rsi >= 30:
+                if stoch_k < 80 and stoch_k > stoch_d:
+                    if is_bullish_candle and self.last_trade_action != "Buy":
+                        self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
                 
         elif h1_trend_bearish and current_price < ema_val and adx_val > 20:
-            if prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
-                self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
+            # RSI Peak Sell + Stoch Cross Down + Bearish Candle
+            if prev_rsi > 70 and current_rsi <= 70:
+                if stoch_k > 20 and stoch_k < stoch_d:
+                    if is_bearish_candle and self.last_trade_action != "Sell":
+                        self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
 
     def run_ict_trader_logic(self, strategy, symbol, timeframe):
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 205)
