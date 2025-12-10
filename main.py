@@ -313,22 +313,51 @@ class BackendWorker(QRunnable):
             self.signals.update_status.emit(f"Scalper: Symbol '{symbol}' not found!", "red")
             return
         if symbol_info.spread > max_spread: self.signals.update_status.emit(f"Scalper: Spread too high ({symbol_info.spread}). Waiting...", "orange"); return
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 250) # Need more history for larger EMAs
+        
+        # 1. H1 Trend Filter
+        h1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 205)
+        h1_trend_bullish = True; h1_trend_bearish = True # Default true if no data, but better to be safe
+        h1_ema200 = 0.0
+        
+        if h1_rates is not None and len(h1_rates) >= 200:
+            h1_close = np.array([r['close'] for r in h1_rates])
+            h1_ema200 = calculate_ema(h1_close, 200)
+            if h1_ema200:
+                current_price_h1 = h1_close[-1]
+                h1_trend_bullish = current_price_h1 > h1_ema200
+                h1_trend_bearish = current_price_h1 < h1_ema200
+        
+        # 2. M5 Logic
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 250) 
         if rates is None or len(rates) < ema_period + 1: return
+        
         close_prices = np.array([r['close'] for r in rates])
+        high_prices = np.array([r['high'] for r in rates])
+        low_prices = np.array([r['low'] for r in rates])
+
         rsi_values = calculate_rsi(close_prices, 14)
-        if len(rsi_values) < 2: return
+        adx_val = calculate_adx(high_prices, low_prices, close_prices, 14)
+        
+        if len(rsi_values) < 2 or adx_val is None: return
+        
         current_rsi, prev_rsi = rsi_values[-1], rsi_values[-2]
         current_price = close_prices[-1]
         ema_val = calculate_ema(close_prices, ema_period)
+        
         if ema_val is None:
             self.signals.update_status.emit(f"Scalper: Not enough data for EMA{ema_period}.", "orange")
             return
-        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f}, EMA{ema_period}={ema_val:.2f}, RSI={current_rsi:.2f}", "cyan")
-        if current_price > ema_val and prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
-            self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
-        elif current_price < ema_val and prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
-            self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
+            
+        self.signals.update_status.emit(f"Scalper: Price={current_price:.2f} | H1 EMA200={h1_ema200:.2f} | M5 EMA{ema_period}={ema_val:.2f} | RSI={current_rsi:.1f} | ADX={adx_val:.1f}", "cyan")
+        
+        # Logic: Trend (H1) + Trend (M5) + Volatility (ADX) + Momentum (RSI Dip)
+        if h1_trend_bullish and current_price > ema_val and adx_val > 20:
+            if prev_rsi < 30 and current_rsi >= 30 and self.last_trade_action != "Buy":
+                self.last_trade_action = "Buy"; self.execute_trade("Buy", is_auto=True)
+                
+        elif h1_trend_bearish and current_price < ema_val and adx_val > 20:
+            if prev_rsi > 70 and current_rsi <= 70 and self.last_trade_action != "Sell":
+                self.last_trade_action = "Sell"; self.execute_trade("Sell", is_auto=True)
 
     def run_ict_trader_logic(self, strategy, symbol, timeframe):
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 205)
