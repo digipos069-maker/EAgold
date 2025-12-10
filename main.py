@@ -57,6 +57,7 @@ class BackendWorker(QRunnable):
         self.autotrade_enabled = False
         self.last_trade_action = None
         self.strategy_params = {}
+        self.symbol = "XAUUSDm"  # Default symbol
 
         self.timeframe_map = {
             "1 Minute (M1)": mt5.TIMEFRAME_M1, "5 Minutes (M5)": mt5.TIMEFRAME_M5,
@@ -89,11 +90,12 @@ class BackendWorker(QRunnable):
         return True
 
     def update_price(self):
-        symbol = "XAUUSDm"
         while True:
-            tick = mt5.symbol_info_tick(symbol)
+            tick = mt5.symbol_info_tick(self.symbol)
             if tick:
                 self.signals.update_price.emit(f"${tick.ask:.2f}")
+            else:
+                self.signals.update_price.emit("N/A")
             time.sleep(1)
 
     def sync_trade_history(self):
@@ -134,9 +136,11 @@ class BackendWorker(QRunnable):
             self.signals.show_message.emit("Error", "Invalid Risk Management values.")
             return
 
-        symbol = "XAUUSDm"; lot_size = 0.01
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick: return
+        lot_size = 0.01
+        tick = mt5.symbol_info_tick(self.symbol)
+        if not tick:
+            self.signals.show_message.emit("Error", f"Could not get price for {self.symbol}")
+            return
         
         price = tick.ask if trade_type == "Buy" else tick.bid
         
@@ -144,7 +148,7 @@ class BackendWorker(QRunnable):
         sl = sl_price if sl_price is not None else (price - sl_val if trade_type == "Buy" else price + sl_val)
         tp = tp_price if tp_price is not None else (price + tp_val if trade_type == "Buy" else price - tp_val)
 
-        request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lot_size, "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
+        request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": lot_size, "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
         result = mt5.order_send(request)
         
         position_id = None
@@ -154,7 +158,7 @@ class BackendWorker(QRunnable):
                 position_id = deals[0].position_id
         
         if not position_id:
-            if not is_auto: self.signals.show_message.emit("Order Failed", f"Order failed: {result.comment}")
+            if not is_auto: self.signals.show_message.emit("Order Failed", f"Order failed: {result.comment if result else 'Unknown'}")
         else:
             if not is_auto: self.signals.show_message.emit("Success", f"{trade_type} order placed.")
             trade_source = f"Auto {trade_type}" if is_auto else f"Manual {trade_type}"
@@ -192,14 +196,12 @@ class BackendWorker(QRunnable):
                 param2 = self.strategy_params.get('param2')
                 param3 = self.strategy_params.get('param3')
                 
-                symbol = "XAUUSDm"
-                
                 try:
-                    if strategy == "MA Crossover": self.run_ma_crossover_logic(strategy, symbol, timeframe, param1, param2)
-                    elif strategy == "Trend Following": self.run_trend_following_logic(strategy, symbol, timeframe, param1, param2)
-                    elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, symbol, param3, self.strategy_params.get('scalper_ema', 21))
-                    elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, symbol, timeframe)
-                    elif strategy == "ICT Gold Scalping": self.run_ict_gold_scalping_logic(strategy, symbol, timeframe)
+                    if strategy == "MA Crossover": self.run_ma_crossover_logic(strategy, self.symbol, timeframe, param1, param2)
+                    elif strategy == "Trend Following": self.run_trend_following_logic(strategy, self.symbol, timeframe, param1, param2)
+                    elif strategy == "Gold M5 Scalper": self.run_gold_scalper_logic(strategy, self.symbol, param3, self.strategy_params.get('scalper_ema', 21))
+                    elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, self.symbol, timeframe)
+                    elif strategy == "ICT Gold Scalping": self.run_ict_gold_scalping_logic(strategy, self.symbol, timeframe)
                 except Exception as e:
                     print(f"Error in strategy run: {e}")
                     self.signals.update_status.emit(f"Strategy Error: {e}", "red")
@@ -244,7 +246,9 @@ class BackendWorker(QRunnable):
 
     def run_gold_scalper_logic(self, strategy, symbol, max_spread, ema_period):
         symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info: return
+        if not symbol_info:
+            self.signals.update_status.emit(f"Scalper: Symbol '{symbol}' not found!", "red")
+            return
         if symbol_info.spread > max_spread: self.signals.update_status.emit(f"Scalper: Spread too high ({symbol_info.spread}). Waiting...", "orange"); return
         rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 250) # Need more history for larger EMAs
         if rates is None or len(rates) < ema_period + 1: return
@@ -849,7 +853,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_label)
 
         price_layout = QHBoxLayout()
-        price_layout.addWidget(QLabel("Gold Price (XAUUSDm):"))
+        price_layout.addWidget(QLabel("Symbol:"))
+        self.symbol_input = QLineEdit("XAUUSDm")
+        self.symbol_input.setFixedWidth(100)
+        self.symbol_input.textChanged.connect(self.update_symbol)
+        price_layout.addWidget(self.symbol_input)
+
+        price_layout.addWidget(QLabel("Price:"))
         self.price_label = QLabel("N/A"); self.price_label.setStyleSheet("color: #FFD700; font-weight: bold; font-size: 14pt;")
         price_layout.addWidget(self.price_label)
         price_layout.addStretch()
@@ -880,7 +890,7 @@ class MainWindow(QMainWindow):
         strat_layout.addWidget(self.param1_label, 1, 0); strat_layout.addWidget(self.param1_input, 1, 1)
         self.param2_label = QLabel("Long MA Period:"); self.param2_input = QLineEdit("50")
         strat_layout.addWidget(self.param2_label, 2, 0); strat_layout.addWidget(self.param2_input, 2, 1)
-        self.param3_label = QLabel("Max Spread (pips):"); self.param3_input = QLineEdit("30")
+        self.param3_label = QLabel("Max Spread (Points):"); self.param3_input = QLineEdit("300")
         strat_layout.addWidget(self.param3_label, 3, 0); strat_layout.addWidget(self.param3_input, 3, 1)
         
         self.autotrade_button = QPushButton("Start Auto Trading"); self.autotrade_button.setObjectName("startButton"); self.autotrade_button.clicked.connect(self.toggle_autotrade)
@@ -910,6 +920,10 @@ class MainWindow(QMainWindow):
         self.size_grip.setStyleSheet("width: 20px; height: 20px; background: transparent;") # Ensure it's visible but subtle
         grip_layout.addWidget(self.size_grip)
         main_layout.addLayout(grip_layout)
+
+    def update_symbol(self, text):
+        if hasattr(self, 'worker'):
+            self.worker.symbol = text
 
     def setup_table_view(self, view, model, headers):
         model.setHorizontalHeaderLabels(headers)
@@ -972,8 +986,31 @@ class MainWindow(QMainWindow):
         for row in range(self.open_positions_model.rowCount()):
             if int(self.open_positions_model.item(row, 0).text()) == ticket:
                 trade_row = [self.open_positions_model.item(row, col).clone() for col in range(self.open_positions_model.columnCount())]
-                trade_row[5] = QStandardItem(f"{data['final_pl']:+.2f}")
-                trade_row.append(QStandardItem("Closed"))
+                
+                final_pl = data['final_pl']
+                
+                # Determine Status and Color
+                if final_pl >= 0:
+                    color = QColor("#4CAF50") # Green
+                    status_text = "WIN"
+                else:
+                    color = QColor("#d32f2f") # Red
+                    status_text = "LOSS"
+
+                # Update P/L Item (Index 5)
+                pl_item = QStandardItem(f"{final_pl:+.2f}")
+                pl_item.setForeground(color)
+                pl_item.setTextAlignment(Qt.AlignCenter)
+                trade_row[5] = pl_item
+                
+                # Create Status Item (Index 6) - Badge Style
+                status_item = QStandardItem(status_text)
+                status_item.setForeground(QColor("white"))
+                status_item.setBackground(color)
+                status_item.setTextAlignment(Qt.AlignCenter)
+                
+                trade_row.append(status_item)
+                
                 self.closed_trades_model.appendRow(trade_row)
                 self.open_positions_model.removeRow(row)
                 break
@@ -1104,6 +1141,7 @@ class MainWindow(QMainWindow):
             "param1": self.param1_input.text(),
             "param2": self.param2_input.text(),
             "param3": self.param3_input.text(),
+            "symbol": self.symbol_input.text(),
             # Save scalper settings if they exist
             "scalper_ema": getattr(self, 'scalper_ema', 21)
         }
@@ -1131,6 +1169,7 @@ class MainWindow(QMainWindow):
             if "param1" in settings: self.param1_input.setText(settings["param1"])
             if "param2" in settings: self.param2_input.setText(settings["param2"])
             if "param3" in settings: self.param3_input.setText(settings["param3"])
+            if "symbol" in settings: self.symbol_input.setText(settings["symbol"])
             if "scalper_ema" in settings: self.scalper_ema = settings["scalper_ema"]
             
             # Set strategy last to trigger UI updates, but avoid popup during load
