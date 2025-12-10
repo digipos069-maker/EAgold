@@ -534,7 +534,98 @@ class BackendWorker(QRunnable):
                                 return # Exit after finding a trade
         return # No setup found
 
+    def manage_scalping_trades(self, symbol, timeframe):
+        # Calculate dynamic ATR for management
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 20)
+        if rates is None or len(rates) < 15: return
+        
+        high = np.array([r['high'] for r in rates])
+        low = np.array([r['low'] for r in rates])
+        close = np.array([r['close'] for r in rates])
+        current_atr = calculate_atr(high, low, close, 14)
+        if not current_atr: return
+
+        open_positions = mt5.positions_get(symbol=symbol, magic=234000)
+        if not open_positions: return
+
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick: return
+
+        for pos in open_positions:
+            # 1. Break-Even Logic
+            # If profit > 0.8 * ATR, move SL to Entry (+ small buffer)
+            be_trigger = 0.8 * current_atr
+            be_buffer = 0.1 * current_atr # Small profit to cover swap/commissions
+            
+            # 2. Trailing Stop Logic
+            # If profit > 1.5 * ATR, trail by 1.0 * ATR
+            trail_trigger = 1.5 * current_atr
+            trail_dist = 1.0 * current_atr
+
+            if pos.type == mt5.ORDER_TYPE_BUY:
+                current_profit_dist = tick.bid - pos.price_open
+                
+                # Check Break-Even
+                new_sl = pos.price_open + be_buffer
+                if current_profit_dist > be_trigger and pos.sl < new_sl:
+                    request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": pos.ticket,
+                        "sl": new_sl,
+                        "tp": pos.tp,
+                        "magic": 234000
+                    }
+                    mt5.order_send(request)
+                    self.signals.update_status.emit(f"Manager: Moved Buy #{pos.ticket} to Breakeven.", "green")
+
+                # Check Trailing
+                if current_profit_dist > trail_trigger:
+                    potential_new_sl = tick.bid - trail_dist
+                    if potential_new_sl > pos.sl: # Only move SL up
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "position": pos.ticket,
+                            "sl": potential_new_sl,
+                            "tp": pos.tp,
+                            "magic": 234000
+                        }
+                        mt5.order_send(request)
+                        self.signals.update_status.emit(f"Manager: Trailing Buy #{pos.ticket} to {potential_new_sl:.2f}", "green")
+
+            elif pos.type == mt5.ORDER_TYPE_SELL:
+                current_profit_dist = pos.price_open - tick.ask
+                
+                # Check Break-Even
+                new_sl = pos.price_open - be_buffer
+                if current_profit_dist > be_trigger and (pos.sl == 0 or pos.sl > new_sl):
+                    request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": pos.ticket,
+                        "sl": new_sl,
+                        "tp": pos.tp,
+                        "magic": 234000
+                    }
+                    mt5.order_send(request)
+                    self.signals.update_status.emit(f"Manager: Moved Sell #{pos.ticket} to Breakeven.", "green")
+
+                # Check Trailing
+                if current_profit_dist > trail_trigger:
+                    potential_new_sl = tick.ask + trail_dist
+                    if pos.sl == 0 or potential_new_sl < pos.sl: # Only move SL down
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "position": pos.ticket,
+                            "sl": potential_new_sl,
+                            "tp": pos.tp,
+                            "magic": 234000
+                        }
+                        mt5.order_send(request)
+                        self.signals.update_status.emit(f"Manager: Trailing Sell #{pos.ticket} to {potential_new_sl:.2f}", "green")
+
     def run_gold_scalping_new_logic(self, strategy, symbol):
+        # 0. Manage Open Trades (Trailing/Breakeven)
+        self.manage_scalping_trades(symbol, mt5.TIMEFRAME_M15)
+
         # 1. Fetch Data
         # H1 for Trend Bias (EMA200)
         h1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 205)

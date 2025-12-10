@@ -2,7 +2,7 @@
     "tp": "3.0",
     "sl": "2.0",
     "max_pos": "5",
-    "strategy": "Gold Scalping New",
+    "strategy": "Gold M5 Scalper",
     "timeframe": "5 Minutes (M5)",
     "start_time": "00:00",
     "end_time": "23:59",
