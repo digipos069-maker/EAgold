@@ -885,9 +885,13 @@ class MainWindow(QMainWindow):
         is_gold_new = (strategy == "Gold Scalping New")
         is_smc = (strategy == "SMC")
 
-        # Auto-lot strategies (SMC and Gold Scalping New calculate their own volume)
-        uses_auto_lot = (is_smc or is_gold_new)
-        self.lot_size_input.setEnabled(not uses_auto_lot)
+        # Strategies that calculate their own Lot Size, TP, and SL internally
+        # We disable these inputs to prevent confusion, as user values here are ignored.
+        uses_internal_risk = (is_smc or is_gold_new)
+        
+        self.lot_size_input.setEnabled(not uses_internal_risk)
+        self.tp_input.setEnabled(not uses_internal_risk)
+        self.sl_input.setEnabled(not uses_internal_risk)
 
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: 
