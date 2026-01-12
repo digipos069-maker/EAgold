@@ -10,5 +10,5 @@
     "param2": "50",
     "param3": "160",
     "symbol": "XAUUSDm",
-    "scalper_ema": 21
+    "scalper_ema": 50
 }

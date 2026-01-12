@@ -214,7 +214,7 @@ class BackendWorker(QRunnable):
                 print(f"Error in history sync: {e}")
             time.sleep(5)
 
-    def execute_trade(self, trade_type, is_auto=False, sl_price=None, tp_price=None, volume=0.01):
+    def execute_trade(self, trade_type, is_auto=False, sl_price=None, tp_price=None, volume=None):
         try:
             max_pos = self.strategy_params['max_pos']
             open_positions = mt5.positions_get(magic=234000)
@@ -223,6 +223,11 @@ class BackendWorker(QRunnable):
                 return
 
             tp_val = self.strategy_params['tp']; sl_val = self.strategy_params['sl']
+            
+            # Determine volume
+            if volume is None:
+                volume = self.strategy_params.get('lot_size', 0.01)
+                
         except (ValueError, TypeError, KeyError):
             self.signals.show_message.emit("Error", "Invalid Risk Management values.")
             return
@@ -1217,11 +1222,33 @@ class MainWindow(QMainWindow):
 
         risk_box = QGroupBox("Risk Management")
         risk_layout = QGridLayout(risk_box)
-        risk_layout.addWidget(QLabel("Take Profit ($):"), 0, 0); self.tp_input = QLineEdit("3.0"); risk_layout.addWidget(self.tp_input, 0, 1)
-        risk_layout.addWidget(QLabel("Stop Loss ($):"), 1, 0); self.sl_input = QLineEdit("2.0"); risk_layout.addWidget(self.sl_input, 1, 1)
-        risk_layout.addWidget(QLabel("Max Positions:"), 0, 2); self.max_pos_input = QLineEdit("5"); risk_layout.addWidget(self.max_pos_input, 0, 3)
-        self.buy_button = QPushButton("Manual Buy"); self.buy_button.setObjectName("buyButton"); self.buy_button.clicked.connect(self.manual_buy); risk_layout.addWidget(self.buy_button, 1, 2)
-        self.sell_button = QPushButton("Manual Sell"); self.sell_button.setObjectName("sellButton"); self.sell_button.clicked.connect(self.manual_sell); risk_layout.addWidget(self.sell_button, 1, 3)
+        
+        risk_layout.addWidget(QLabel("Lot Size:"), 0, 0)
+        self.lot_size_input = QLineEdit("0.01")
+        risk_layout.addWidget(self.lot_size_input, 0, 1)
+        
+        risk_layout.addWidget(QLabel("Max Positions:"), 0, 2)
+        self.max_pos_input = QLineEdit("5")
+        risk_layout.addWidget(self.max_pos_input, 0, 3)
+
+        risk_layout.addWidget(QLabel("Take Profit ($):"), 1, 0)
+        self.tp_input = QLineEdit("3.0")
+        risk_layout.addWidget(self.tp_input, 1, 1)
+        
+        risk_layout.addWidget(QLabel("Stop Loss ($):"), 1, 2)
+        self.sl_input = QLineEdit("2.0")
+        risk_layout.addWidget(self.sl_input, 1, 3)
+
+        self.buy_button = QPushButton("Manual Buy")
+        self.buy_button.setObjectName("buyButton")
+        self.buy_button.clicked.connect(self.manual_buy)
+        risk_layout.addWidget(self.buy_button, 2, 0, 1, 2)
+
+        self.sell_button = QPushButton("Manual Sell")
+        self.sell_button.setObjectName("sellButton")
+        self.sell_button.clicked.connect(self.manual_sell)
+        risk_layout.addWidget(self.sell_button, 2, 2, 1, 2)
+
         layout.addWidget(risk_box)
 
         strat_box = QGroupBox("Strategy Settings")
@@ -1379,7 +1406,12 @@ class MainWindow(QMainWindow):
 
     def get_risk_params(self):
         try:
-            return {'tp': float(self.tp_input.text()), 'sl': float(self.sl_input.text()), 'max_pos': int(self.max_pos_input.text())}
+            return {
+                'tp': float(self.tp_input.text()),
+                'sl': float(self.sl_input.text()),
+                'max_pos': int(self.max_pos_input.text()),
+                'lot_size': float(self.lot_size_input.text())
+            }
         except (ValueError, TypeError):
             self.show_message("Error", "Invalid values in Risk Management.")
             return {}
@@ -1485,6 +1517,7 @@ class MainWindow(QMainWindow):
             "tp": self.tp_input.text(),
             "sl": self.sl_input.text(),
             "max_pos": self.max_pos_input.text(),
+            "lot_size": self.lot_size_input.text(),
             "strategy": self.strategy_combo.currentText(),
             "timeframe": self.timeframe_combo.currentText(),
             "start_time": self.start_time_input.text(),
@@ -1514,6 +1547,7 @@ class MainWindow(QMainWindow):
             if "tp" in settings: self.tp_input.setText(settings["tp"])
             if "sl" in settings: self.sl_input.setText(settings["sl"])
             if "max_pos" in settings: self.max_pos_input.setText(settings["max_pos"])
+            if "lot_size" in settings: self.lot_size_input.setText(settings["lot_size"])
             if "timeframe" in settings: self.timeframe_combo.setCurrentText(settings["timeframe"])
             if "start_time" in settings: self.start_time_input.setText(settings["start_time"])
             if "end_time" in settings: self.end_time_input.setText(settings["end_time"])

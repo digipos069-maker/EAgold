@@ -1,8 +1,8 @@
 {
-    "tp": "3.0",
-    "sl": "2.0",
+    "tp": "4",
+    "sl": "7",
     "max_pos": "5",
-    "strategy": "Gold M5 Scalper",
+    "strategy": "Gold Scalping New",
     "timeframe": "5 Minutes (M5)",
     "start_time": "00:00",
     "end_time": "23:59",
@@ -10,5 +10,5 @@
     "param2": "50",
     "param3": "160",
     "symbol": "XAUUSDm",
-    "scalper_ema": 21
+    "scalper_ema": 50
 }
