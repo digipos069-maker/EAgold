@@ -193,13 +193,13 @@ class BackendWorker(QRunnable):
                 param3 = self.strategy_params.get('param3')
                 
                 try:
-                    if strategy == "MA Crossover": run_ma_crossover_logic(self, strategy, self.symbol, timeframe, param1, param2)
-                    elif strategy == "Trend Following": run_trend_following_logic(self, strategy, self.symbol, timeframe, param1, param2)
-                    elif strategy == "Gold M5 Scalper": run_gold_scalper_logic(self, strategy, self.symbol, param3, self.strategy_params.get('scalper_ema', 21))
-                    elif strategy == "ICT Trader": run_ict_trader_logic(self, strategy, self.symbol, timeframe)
-                    elif strategy == "ICT Gold Scalping": run_ict_gold_scalping_logic(self, strategy, self.symbol, timeframe)
-                    elif strategy == "Gold Scalping New": run_gold_scalping_new_logic(self, strategy, self.symbol)
-                    elif strategy == "SMC": run_smc_logic(self, strategy, self.symbol, timeframe, param1, param2) # param1=Risk%, param2=RR
+                    if strategy == "MA Crossover": run_ma_crossover_logic(self, self.symbol, timeframe, param1, param2)
+                    elif strategy == "Trend Following": run_trend_following_logic(self, self.symbol, timeframe, param1, param2)
+                    elif strategy == "Gold M5 Scalper": run_gold_scalper_logic(self, self.symbol, param3, self.strategy_params.get('scalper_ema', 21))
+                    elif strategy == "ICT Trader": run_ict_trader_logic(self, self.symbol, timeframe)
+                    elif strategy == "ICT Gold Scalping": run_ict_gold_scalping_logic(self, self.symbol, timeframe)
+                    elif strategy == "Gold Scalping New": run_gold_scalping_new_logic(self, self.symbol)
+                    elif strategy == "SMC": run_smc_logic(self, self.symbol, timeframe, param1, param2) # param1=Risk%, param2=RR
                 except Exception as e:
                     print(f"Error in strategy run: {e}")
                     self.signals.update_status.emit(f"Strategy Error: {e}", "red")
