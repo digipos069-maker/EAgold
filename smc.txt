@@ -1,0 +1,144 @@
+You are a senior quantitative trading engineer and professional MQL developer.
+
+TASK:
+Design and generate a FULLY AUTOMATED Expert Advisor (EA) based on Smart Money Concepts (SMC).
+
+PLATFORM:
+- MetaTrader 5 (MQL5)
+- Clean, modular, well-commented code
+- No external indicators (price action only)
+
+==============================
+CORE STRATEGY: SMART MONEY CONCEPTS
+==============================
+
+1. MARKET STRUCTURE
+- Detect Higher High (HH), Higher Low (HL), Lower High (LH), Lower Low (LL)
+- Identify:
+  - BOS (Break of Structure) for continuation
+  - CHoCH (Change of Character) for reversal
+- Higher Timeframe (HTF) defines bias
+- Lower Timeframe (LTF) used for entries
+
+HTF (trend & bias):
+- Default: H1 or H4 (configurable)
+
+LTF (entry):
+- Default: M5 or M15 (configurable)
+
+==============================
+2. LIQUIDITY LOGIC
+==============================
+- Detect Buy-side liquidity:
+  - Equal highs
+  - Previous session high
+- Detect Sell-side liquidity:
+  - Equal lows
+  - Previous session low
+- Trade ONLY after liquidity sweep occurs
+- Liquidity sweep must happen BEFORE entry
+
+==============================
+3. ORDER BLOCK DETECTION
+==============================
+Bullish Order Block:
+- Last bearish candle before strong bullish displacement
+Bearish Order Block:
+- Last bullish candle before strong bearish displacement
+
+Rules:
+- OB must cause BOS or displacement
+- Use candle body (optional wick toggle input)
+- Mark OB zone and wait for price to return
+
+==============================
+4. FAIR VALUE GAP (FVG)
+==============================
+- Detect 3-candle imbalance
+- Bullish FVG: candle1 high < candle3 low
+- Bearish FVG: candle1 low > candle3 high
+- Entry allowed only if price taps FVG or OB
+
+==============================
+5. PREMIUM / DISCOUNT
+==============================
+- Use Fibonacci 0–100 of latest impulse
+- Buy only in Discount zone (50–79%)
+- Sell only in Premium zone (21–50%)
+
+==============================
+6. ENTRY CONDITIONS (ALL MUST MATCH)
+==============================
+BUY:
+- HTF bullish
+- Sell-side liquidity swept
+- CHoCH on LTF
+- Price taps Bullish OB or Bullish FVG
+- Price is in Discount zone
+
+SELL:
+- HTF bearish
+- Buy-side liquidity swept
+- CHoCH on LTF
+- Price taps Bearish OB or Bearish FVG
+- Price is in Premium zone
+
+==============================
+7. RISK MANAGEMENT
+==============================
+- Risk per trade: % of balance (input)
+- RR minimum: 1:2 (configurable)
+- SL:
+  - Below OB (buy)
+  - Above OB (sell)
+- TP:
+  - Nearest liquidity
+  - Or fixed RR
+- One trade per direction at a time
+- Max trades per day (input)
+
+==============================
+8. SESSION FILTER
+==============================
+- Trade only during:
+  - London Session
+  - New York Session
+- Input toggles to enable/disable sessions
+
+==============================
+9. NEWS & SAFETY FILTERS
+==============================
+- Spread filter (max spread input)
+- Minimum candle range filter
+- No trading during low volatility
+
+==============================
+10. EA INPUT PARAMETERS
+==============================
+- HTF timeframe
+- LTF timeframe
+- Risk %
+- RR ratio
+- Max trades per day
+- Session enable/disable
+- Use OB / FVG toggles
+- Debug mode (print logs)
+
+==============================
+11. OUTPUT REQUIRED
+==============================
+- Complete MQL5 EA code
+- Modular functions:
+  - DetectStructure()
+  - DetectLiquidity()
+  - DetectOrderBlock()
+  - DetectFVG()
+  - EntryLogic()
+  - RiskManager()
+- Clear comments for every logic block
+- No placeholders or pseudo-code
+
+IMPORTANT:
+- Do NOT explain theory
+- Produce WORKING EA code only
+- Follow professional MQL5 standards

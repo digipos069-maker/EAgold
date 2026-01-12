@@ -298,6 +298,7 @@ class BackendWorker(QRunnable):
                     elif strategy == "ICT Trader": self.run_ict_trader_logic(strategy, self.symbol, timeframe)
                     elif strategy == "ICT Gold Scalping": self.run_ict_gold_scalping_logic(strategy, self.symbol, timeframe)
                     elif strategy == "Gold Scalping New": self.run_gold_scalping_new_logic(strategy, self.symbol)
+                    elif strategy == "SMC": self.run_smc_logic(strategy, self.symbol, timeframe, param1, param2) # param1=Risk%, param2=RR
                 except Exception as e:
                     print(f"Error in strategy run: {e}")
                     self.signals.update_status.emit(f"Strategy Error: {e}", "red")
@@ -310,6 +311,169 @@ class BackendWorker(QRunnable):
                     time.sleep(1)
             else:
                 time.sleep(1) # Sleep briefly when disabled
+
+    # --- SMC Helper Functions ---
+    def find_swings(self, highs, lows, lookback=5):
+        swings = []
+        for i in range(lookback, len(highs) - lookback):
+            is_high = all(highs[i] > highs[i-k] for k in range(1, lookback+1)) and \
+                      all(highs[i] > highs[i+k] for k in range(1, lookback+1))
+            is_low = all(lows[i] < lows[i-k] for k in range(1, lookback+1)) and \
+                     all(lows[i] < lows[i+k] for k in range(1, lookback+1))
+            if is_high: swings.append({'type': 'high', 'price': highs[i], 'index': i})
+            elif is_low: swings.append({'type': 'low', 'price': lows[i], 'index': i})
+        return swings
+
+    def get_structure(self, swings):
+        if len(swings) < 4: return "Uncertain"
+        # Check last 2 highs and lows
+        highs = [s for s in swings if s['type'] == 'high']
+        lows = [s for s in swings if s['type'] == 'low']
+        if len(highs) < 2 or len(lows) < 2: return "Uncertain"
+        
+        if highs[-1]['price'] > highs[-2]['price'] and lows[-1]['price'] > lows[-2]['price']:
+            return "Bullish"
+        if highs[-1]['price'] < highs[-2]['price'] and lows[-1]['price'] < lows[-2]['price']:
+            return "Bearish"
+        return "Ranging"
+
+    def run_smc_logic(self, strategy, symbol, timeframe, risk_percent, rr_ratio):
+        # Default params if not set
+        if not risk_percent: risk_percent = 1
+        if not rr_ratio: rr_ratio = 2
+        
+        # 1. HTF Bias (H1)
+        h1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 100)
+        if h1_rates is None or len(h1_rates) < 100: return
+        h1_high = np.array([r['high'] for r in h1_rates])
+        h1_low = np.array([r['low'] for r in h1_rates])
+        h1_swings = self.find_swings(h1_high, h1_low)
+        bias = self.get_structure(h1_swings)
+        
+        # 2. LTF Structure & Entry (Current Timeframe)
+        ltf_rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 100)
+        if ltf_rates is None or len(ltf_rates) < 100: return
+        
+        ltf_open = np.array([r['open'] for r in ltf_rates])
+        ltf_close = np.array([r['close'] for r in ltf_rates])
+        ltf_high = np.array([r['high'] for r in ltf_rates])
+        ltf_low = np.array([r['low'] for r in ltf_rates])
+        
+        current_price = ltf_close[-1]
+        
+        self.signals.update_status.emit(f"SMC: Price={current_price:.2f} | Bias={bias}", "cyan")
+        
+        signal = None
+        stop_loss = 0.0
+        
+        # Look for FVG/OB in recent candles (e.g., last 10)
+        # Entry Condition: Bias matches + Tap into FVG/OB
+        
+        if bias == "Bullish":
+            # Find Bullish FVG or OB below current price
+            for i in range(len(ltf_rates)-2, len(ltf_rates)-15, -1):
+                # Bullish FVG: High[i-1] < Low[i+1]
+                if ltf_high[i-1] < ltf_low[i+1]:
+                    fvg_top = ltf_low[i+1]
+                    fvg_bottom = ltf_high[i-1]
+                    
+                    if fvg_bottom <= current_price <= fvg_top:
+                        if ltf_close[-1] > ltf_open[-1]:
+                            signal = "Buy"
+                            stop_loss = fvg_bottom - (ltf_high[i-1] - ltf_low[i-1])*0.5 # Below FVG
+                            break
+                            
+            # Check OB if no FVG signal
+            if not signal:
+                 for i in range(len(ltf_rates)-3, len(ltf_rates)-15, -1):
+                    # Bullish OB: Bearish candle before strong move up
+                    if ltf_close[i] < ltf_open[i]: # Bearish
+                        # Next candle strong bullish?
+                        if ltf_close[i+1] > ltf_open[i+1] and ltf_close[i+1] > ltf_high[i]:
+                             ob_top = ltf_high[i]
+                             ob_bottom = ltf_low[i]
+                             if ob_bottom <= current_price <= ob_top:
+                                  if ltf_close[-1] > ltf_open[-1]:
+                                      signal = "Buy"
+                                      stop_loss = ob_bottom - 0.5
+                                      break
+
+        elif bias == "Bearish":
+            # Find Bearish FVG or OB above current price
+            for i in range(len(ltf_rates)-2, len(ltf_rates)-15, -1):
+                # Bearish FVG: Low[i-1] > High[i+1]
+                if ltf_low[i-1] > ltf_high[i+1]:
+                    fvg_top = ltf_low[i-1]
+                    fvg_bottom = ltf_high[i+1]
+                    
+                    if fvg_bottom <= current_price <= fvg_top:
+                        if ltf_close[-1] < ltf_open[-1]:
+                            signal = "Sell"
+                            stop_loss = fvg_top + (ltf_high[i-1] - ltf_low[i-1])*0.5
+                            break
+            
+            if not signal:
+                for i in range(len(ltf_rates)-3, len(ltf_rates)-15, -1):
+                    # Bearish OB: Bullish candle before strong move down
+                    if ltf_close[i] > ltf_open[i]:
+                        if ltf_close[i+1] < ltf_open[i+1] and ltf_close[i+1] < ltf_low[i]:
+                             ob_top = ltf_high[i]
+                             ob_bottom = ltf_low[i]
+                             if ob_bottom <= current_price <= ob_top:
+                                  if ltf_close[-1] < ltf_open[-1]:
+                                      signal = "Sell"
+                                      stop_loss = ob_top + 0.5
+                                      break
+        
+        # Execute
+        if signal:
+            if signal == "Buy" and self.last_trade_action != "Buy":
+                sl_dist = current_price - stop_loss
+                if sl_dist <= 0: sl_dist = 0.5 # Safety
+                tp_dist = sl_dist * rr_ratio
+                tp = current_price + tp_dist
+                
+                # Calc Volume based on Risk %
+                calc_volume = 0.01
+                try:
+                    account = mt5.account_info()
+                    symbol_info = mt5.symbol_info(symbol)
+                    if account and symbol_info and sl_dist > 0:
+                        risk_amount = (risk_percent / 100.0) * account.balance
+                        contract_size = symbol_info.trade_contract_size
+                        raw_volume = risk_amount / (sl_dist * contract_size)
+                        step = symbol_info.volume_step
+                        calc_volume = round(raw_volume / step) * step
+                        calc_volume = max(symbol_info.volume_min, min(symbol_info.volume_max, calc_volume))
+                except: pass
+
+                self.last_trade_action = "Buy"
+                self.execute_trade("Buy", is_auto=True, sl_price=stop_loss, tp_price=tp, volume=calc_volume)
+                self.signals.update_status.emit(f"SMC: Buy Signal. Vol={calc_volume:.2f}, RR=1:{rr_ratio}", "green")
+
+            elif signal == "Sell" and self.last_trade_action != "Sell":
+                sl_dist = stop_loss - current_price
+                if sl_dist <= 0: sl_dist = 0.5
+                tp_dist = sl_dist * rr_ratio
+                tp = current_price - tp_dist
+                
+                # Calc Volume
+                calc_volume = 0.01
+                try:
+                    account = mt5.account_info()
+                    symbol_info = mt5.symbol_info(symbol)
+                    if account and symbol_info and sl_dist > 0:
+                        risk_amount = (risk_percent / 100.0) * account.balance
+                        contract_size = symbol_info.trade_contract_size
+                        raw_volume = risk_amount / (sl_dist * contract_size)
+                        step = symbol_info.volume_step
+                        calc_volume = round(raw_volume / step) * step
+                        calc_volume = max(symbol_info.volume_min, min(symbol_info.volume_max, calc_volume))
+                except: pass
+
+                self.last_trade_action = "Sell"
+                self.execute_trade("Sell", is_auto=True, sl_price=stop_loss, tp_price=tp, volume=calc_volume)
+                self.signals.update_status.emit(f"SMC: Sell Signal. Vol={calc_volume:.2f}, RR=1:{rr_ratio}", "red")
 
     # --- Individual Strategy Logics (No changes) ---
     def run_ma_crossover_logic(self, strategy, symbol, timeframe, short_period, long_period):
@@ -1253,7 +1417,7 @@ class MainWindow(QMainWindow):
 
         strat_box = QGroupBox("Strategy Settings")
         strat_layout = QGridLayout(strat_box)
-        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader", "ICT Gold Scalping", "Gold Scalping New"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
+        self.strategy_combo = QComboBox(); self.strategy_combo.addItems(["MA Crossover", "Trend Following", "Gold M5 Scalper", "ICT Trader", "ICT Gold Scalping", "Gold Scalping New", "SMC"]); self.strategy_combo.currentTextChanged.connect(self.update_ui_for_strategy)
         strat_layout.addWidget(QLabel("Strategy:"), 0, 0); strat_layout.addWidget(self.strategy_combo, 0, 1)
         self.timeframe_combo = QComboBox(); self.timeframe_combo.addItems(["1 Minute (M1)", "5 Minutes (M5)", "15 Minutes (M15)", "1 Hour (H1)", "4 Hours (H4)"])
         strat_layout.addWidget(QLabel("Timeframe:"), 0, 2); strat_layout.addWidget(self.timeframe_combo, 0, 3)
@@ -1457,6 +1621,7 @@ class MainWindow(QMainWindow):
         is_ict = (strategy == "ICT Trader")
         is_ict_scalper = (strategy == "ICT Gold Scalping")
         is_gold_new = (strategy == "Gold Scalping New")
+        is_smc = (strategy == "SMC")
 
         self.timeframe_combo.setEnabled(not is_scalper)
         if is_scalper: 
@@ -1471,6 +1636,9 @@ class MainWindow(QMainWindow):
 
         # Disable parameter inputs for ICT strategies and Gold Scalping New
         params_enabled = not (is_scalper or is_ict or is_ict_scalper or is_gold_new)
+        # Re-enable for SMC but with specific meanings
+        if is_smc: params_enabled = True
+
         self.param1_label.setEnabled(params_enabled)
         self.param1_input.setEnabled(params_enabled)
         self.param2_label.setEnabled(params_enabled)
@@ -1487,6 +1655,11 @@ class MainWindow(QMainWindow):
             elif strategy == "Trend Following":
                 self.param1_label.setText("Signal MA Period:")
                 self.param2_label.setText("Trend MA Period:")
+            elif strategy == "SMC":
+                self.param1_label.setText("Risk (%):")
+                self.param2_label.setText("RR Ratio:")
+                self.param1_input.setText("1")
+                self.param2_input.setText("2")
 
     def apply_scalper_settings(self, settings):
         # Store EMA for the worker (default 21)

@@ -1,0 +1,28 @@
+# SMC (Smart Money Concepts) Strategy Guide
+
+This Expert Advisor (EA) implements a simplified version of Smart Money Concepts focused on Market Structure, Fair Value Gaps (FVG), and Order Blocks (OB).
+
+## 1. Core Logic
+- **HTF Bias (H1):** The EA analyzes the 1-Hour timeframe to determine the overall market trend (Bullish or Bearish) using swing points.
+- **LTF Entry (User Selected):** It searches for entries on your selected timeframe (e.g., M5 or M15).
+- **Triggers:**
+    - **FVG (Fair Value Gap):** Price inefficiency where a gap exists between the high of candle 1 and the low of candle 3.
+    - **OB (Order Block):** The last bearish candle before a strong bullish move (for buys) or the last bullish candle before a strong bearish move (for sells).
+
+## 2. Configuration Parameters
+- **Strategy:** Select "SMC" from the dropdown.
+- **Timeframe:** Select your execution timeframe (M5 or M15 is recommended).
+- **Risk (%):** Enter the percentage of your account balance you want to risk per trade (e.g., 1 for 1%).
+- **RR Ratio:** The Target Risk-to-Reward ratio (e.g., 2 for 1:2).
+
+## 3. How to Start
+1. Select the **SMC** strategy in the Strategy Settings.
+2. Ensure the **Symbol** is correct (e.g., XAUUSDm).
+3. Input your desired **Risk (%)** and **RR Ratio** in the parameter boxes.
+4. Set your **Start/End Trading Hours** (UTC).
+5. Click **Start Auto Trading**.
+
+## 4. Trade Execution
+- **Stop Loss (SL):** Automatically placed below the FVG/OB for buys and above for sells.
+- **Take Profit (TP):** Calculated based on your RR Ratio (SL Distance * RR).
+- **Volume:** Automatically calculated based on your Risk (%) and the SL distance to ensure you never lose more than your defined risk.
