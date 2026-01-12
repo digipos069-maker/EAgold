@@ -3,13 +3,13 @@
     "sl": "2.0",
     "max_pos": "5",
     "lot_size": "0.01",
-    "strategy": "MA Crossover",
+    "strategy": "SMC",
     "timeframe": "5 Minutes (M5)",
     "start_time": "00:00",
     "end_time": "23:59",
-    "param1": "10",
-    "param2": "50",
+    "param1": "1",
+    "param2": "2",
     "param3": "160",
     "symbol": "XAUUSDm",
-    "scalper_ema": 50
+    "scalper_ema": 21
 }
