@@ -29,6 +29,7 @@ from strategies.smc import run_smc_logic
 class WorkerSignals(QObject):
     update_status = Signal(str, str)
     update_price = Signal(str)
+    update_balance = Signal(str)
     add_open_trade = Signal(dict)
     update_pl = Signal(str, float) # Changed ticket to str to handle large 64-bit IDs
     move_to_history = Signal(dict)
@@ -81,6 +82,12 @@ class BackendWorker(QRunnable):
                 self.signals.update_price.emit(f"${tick.ask:.2f}")
             else:
                 self.signals.update_price.emit("N/A")
+            
+            # Update Balance
+            account = mt5.account_info()
+            if account:
+                self.signals.update_balance.emit(f"${account.balance:.2f}")
+            
             time.sleep(1)
 
     def sync_trade_history(self):
@@ -624,7 +631,14 @@ class MainWindow(QMainWindow):
         price_layout.addWidget(QLabel("Price:"))
         self.price_label = QLabel("N/A"); self.price_label.setStyleSheet("color: #FFD700; font-weight: bold; font-size: 14pt;")
         price_layout.addWidget(self.price_label)
+        
         price_layout.addStretch()
+        
+        price_layout.addWidget(QLabel("Balance:"))
+        self.balance_label = QLabel("N/A")
+        self.balance_label.setStyleSheet("color: #00FF00; font-weight: bold; font-size: 12pt;")
+        price_layout.addWidget(self.balance_label)
+        
         layout.addLayout(price_layout)
 
         risk_box = QGroupBox("Risk Management")
@@ -727,6 +741,7 @@ class MainWindow(QMainWindow):
         self.worker = BackendWorker()
         self.worker.signals.update_status.connect(self.update_status)
         self.worker.signals.update_price.connect(self.update_price)
+        self.worker.signals.update_balance.connect(self.update_balance)
         self.worker.signals.add_open_trade.connect(self.add_open_trade)
         self.worker.signals.update_pl.connect(self.update_pl)
         self.worker.signals.move_to_history.connect(self.move_to_history)
@@ -741,6 +756,10 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def update_price(self, text):
         self.price_label.setText(text)
+
+    @Slot(str)
+    def update_balance(self, text):
+        self.balance_label.setText(text)
 
     @Slot(dict)
     def add_open_trade(self, trade_data):
