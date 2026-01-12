@@ -426,12 +426,12 @@ class CustomTitleBar(QWidget):
         self.parent.close()
 
     def mousePressEvent(self, event):
-        self.start = self.mapToGlobal(event.pos())
+        self.start = self.mapToGlobal(event.position().toPoint())
         self.pressing = True
 
     def mouseMoveEvent(self, event):
         if self.pressing:
-            end = self.mapToGlobal(event.pos())
+            end = self.mapToGlobal(event.position().toPoint())
             movement = end - self.start
             self.parent.setGeometry(self.parent.x() + movement.x(),
                                   self.parent.y() + movement.y(),
