@@ -3,13 +3,13 @@
     "sl": "2.0",
     "max_pos": "5",
     "lot_size": "0.01",
-    "strategy": "SMC",
-    "timeframe": "5 Minutes (M5)",
+    "strategy": "ICT Trader",
+    "timeframe": "15 Minutes (M15)",
     "start_time": "00:00",
     "end_time": "23:59",
     "param1": "1",
     "param2": "2",
     "param3": "160",
-    "symbol": "XAUUSDm",
+    "symbol": "XAUUSD",
     "scalper_ema": 21
 }

@@ -75,9 +75,25 @@ class BackendWorker(QRunnable):
         self.signals.update_status.emit(f"Connected to account #{account_info.login}", "green")
         return True
 
+    def ensure_symbol_ready(self):
+        symbol = self.symbol.strip()
+        if symbol != self.symbol:
+            self.symbol = symbol
+
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            self.signals.update_status.emit(f"Symbol not found: {symbol}. Check exact broker symbol name.", "red")
+            return False
+
+        if not symbol_info.visible and not mt5.symbol_select(symbol, True):
+            self.signals.update_status.emit(f"Could not select symbol: {symbol}", "red")
+            return False
+
+        return True
+
     def update_price(self):
         while True:
-            tick = mt5.symbol_info_tick(self.symbol)
+            tick = mt5.symbol_info_tick(self.symbol) if self.ensure_symbol_ready() else None
             if tick:
                 self.signals.update_price.emit(f"${tick.ask:.2f}")
             else:
@@ -133,9 +149,13 @@ class BackendWorker(QRunnable):
             self.signals.show_message.emit("Error", "Invalid Risk Management values.")
             return False
 
+        if not self.ensure_symbol_ready():
+            self.signals.show_message.emit("Error", f"Symbol is not available or not selected: {self.symbol}")
+            return False
+
         tick = mt5.symbol_info_tick(self.symbol)
         if not tick:
-            self.signals.show_message.emit("Error", f"Could not get price for {self.symbol}")
+            self.signals.show_message.emit("Error", f"Could not get live tick price for {self.symbol}")
             return False
         
         price = tick.ask if trade_type == "Buy" else tick.bid
@@ -144,8 +164,17 @@ class BackendWorker(QRunnable):
         sl = sl_price if sl_price is not None else (price - sl_val if trade_type == "Buy" else price + sl_val)
         tp = tp_price if tp_price is not None else (price + tp_val if trade_type == "Buy" else price - tp_val)
 
-        request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": float(volume), "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC }
-        result = mt5.order_send(request)
+        request = { "action": mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": float(volume), "type": mt5.ORDER_TYPE_BUY if trade_type == "Buy" else mt5.ORDER_TYPE_SELL, "price": price, "sl": sl, "tp": tp, "magic": 234000, "comment": "Python EA", "type_time": mt5.ORDER_TIME_GTC }
+        result = None
+        filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        last_comment = "Unknown"
+        for filling_mode in filling_modes:
+            request["type_filling"] = filling_mode
+            result = mt5.order_send(request)
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                break
+            if result:
+                last_comment = result.comment
         
         position_id = None
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -154,7 +183,7 @@ class BackendWorker(QRunnable):
                 position_id = deals[0].position_id
         
         if not position_id:
-            if not is_auto: self.signals.show_message.emit("Order Failed", f"Order failed: {result.comment if result else 'Unknown'}")
+            if not is_auto: self.signals.show_message.emit("Order Failed", f"Order failed: {result.comment if result else last_comment}")
             return False
         else:
             if not is_auto: self.signals.show_message.emit("Success", f"{trade_type} order placed.")

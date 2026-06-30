@@ -385,12 +385,18 @@ class SMCTrader:
 
     def _market_is_tradeable(self):
         symbol_info = mt5.symbol_info(self.symbol)
-        tick = mt5.symbol_info_tick(self.symbol)
-        if not symbol_info or not tick:
+        if not symbol_info:
             self._status(f"Symbol not available: {self.symbol}", "red")
             return False
         if not symbol_info.visible:
-            mt5.symbol_select(self.symbol, True)
+            if not mt5.symbol_select(self.symbol, True):
+                self._status(f"Could not select symbol: {self.symbol}", "red")
+                return False
+            symbol_info = mt5.symbol_info(self.symbol)
+        tick = mt5.symbol_info_tick(self.symbol)
+        if not tick:
+            self._status(f"No live tick for symbol: {self.symbol}", "red")
+            return False
         if symbol_info.spread > MAX_SPREAD_POINTS:
             self._status(f"Spread too high ({symbol_info.spread}).", "orange")
             return False
