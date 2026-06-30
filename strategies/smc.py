@@ -1,373 +1,472 @@
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
+
 import MetaTrader5 as mt5
 import numpy as np
-from datetime import datetime
 
-# --- Constants & Helpers ---
-MAX_LOOKBACK = 500  # Candles to analyze
-SWING_LOOKBACK = 5  # Candles left/right to define a swing point
+
+MAGIC = 234000
+HTF_TIMEFRAME = mt5.TIMEFRAME_H1
+MAX_LOOKBACK = 320
+SWING_LOOKBACK = 3
+SETUP_LOOKBACK = 90
+MAX_SPREAD_POINTS = 300
+MAX_TRADES_PER_DAY = 3
+MIN_RR = 2.0
+
+
+@dataclass
+class MarketData:
+    time: list
+    open: np.ndarray
+    high: np.ndarray
+    low: np.ndarray
+    close: np.ndarray
+    tick_volume: np.ndarray
+    spread: np.ndarray
+
+
+@dataclass
+class Swing:
+    index: int
+    price: float
+    type: str
+
+
+@dataclass
+class LiquidityEvent:
+    side: str
+    level: float
+    sweep_index: int
+    source: str
+
+
+@dataclass
+class StructureShift:
+    direction: str
+    break_index: int
+    break_level: float
+    kind: str
+
+
+@dataclass
+class Zone:
+    kind: str
+    direction: str
+    top: float
+    bottom: float
+    index: int
+
 
 class SMCTrader:
-    def __init__(self, worker, symbol, timeframe, risk_percent, rr_ratio):
+    def __init__(self, worker, symbol, timeframe, risk_percent=1.0, rr_ratio=2.0, name="SMC"):
         self.worker = worker
         self.symbol = symbol
         self.timeframe = timeframe
-        self.risk_percent = float(risk_percent) if risk_percent else 1.0
-        self.rr_ratio = float(rr_ratio) if rr_ratio else 2.0
-        
-    def get_data(self, tf, count=MAX_LOOKBACK):
-        rates = mt5.copy_rates_from_pos(self.symbol, tf, 0, count)
-        if rates is None or len(rates) < count:
-            return None
-        
-        # Convert to structured array/DataFrame-like dict for easier access
-        data = {
-            'time': [datetime.fromtimestamp(x['time']) for x in rates],
-            'open': np.array([x['open'] for x in rates]),
-            'high': np.array([x['high'] for x in rates]),
-            'low': np.array([x['low'] for x in rates]),
-            'close': np.array([x['close'] for x in rates]),
-            'spread': np.array([x['spread'] for x in rates]),
-        }
-        return data
-
-    def find_swings(self, data):
-        """
-        Identifies swing highs and lows.
-        Returns a list of dicts: {'index': int, 'price': float, 'type': 'high'|'low'}
-        """
-        highs = data['high']
-        lows = data['low']
-        swings = []
-        
-        for i in range(SWING_LOOKBACK, len(highs) - SWING_LOOKBACK):
-            # fractal high
-            if all(highs[i] >= highs[i - k] for k in range(1, SWING_LOOKBACK + 1)) and \
-               all(highs[i] > highs[i + k] for k in range(1, SWING_LOOKBACK + 1)):
-                swings.append({'index': i, 'price': highs[i], 'type': 'high'})
-            
-            # fractal low
-            if all(lows[i] <= lows[i - k] for k in range(1, SWING_LOOKBACK + 1)) and \
-               all(lows[i] < lows[i + k] for k in range(1, SWING_LOOKBACK + 1)):
-                swings.append({'index': i, 'price': lows[i], 'type': 'low'})
-                
-        return swings
-
-    def get_market_structure(self, swings):
-        """
-        Determines trend based on recent Higher Highs/Lows vs Lower Highs/Lows.
-        Simple logic: Compare last 2 same-type swings.
-        """
-        if len(swings) < 4:
-            return "Uncertain", None, None # Bias, Last High, Last Low
-
-        highs = [s for s in swings if s['type'] == 'high']
-        lows = [s for s in swings if s['type'] == 'low']
-        
-        if len(highs) < 2 or len(lows) < 2:
-            return "Uncertain", None, None
-
-        last_h = highs[-1]
-        prev_h = highs[-2]
-        last_l = lows[-1]
-        prev_l = lows[-2]
-
-        bias = "Ranging"
-        # Bullish: HH + HL
-        if last_h['price'] > prev_h['price'] and last_l['price'] > prev_l['price']:
-            bias = "Bullish"
-        # Bearish: LH + LL
-        elif last_h['price'] < prev_h['price'] and last_l['price'] < prev_l['price']:
-            bias = "Bearish"
-            
-        return bias, last_h, last_l
-
-    def detect_break_of_structure(self, data, swings, bias):
-        """
-        Detects if the most recent price action broke structure (BOS/CHoCH).
-        Returns: 'BOS', 'CHoCH', or None
-        """
-        # Look at recent price action relative to last structural swing
-        if not swings: return None
-        
-        last_high = [s for s in swings if s['type'] == 'high'][-1]
-        last_low = [s for s in swings if s['type'] == 'low'][-1]
-        
-        current_close = data['close'][-1]
-        
-        # CHoCH Detection (Reversal Signs)
-        # If Bullish, breaking below last HL is CHoCH
-        if bias == "Bullish" and current_close < last_low['price']:
-            return "CHoCH_Bearish"
-        # If Bearish, breaking above last LH is CHoCH
-        if bias == "Bearish" and current_close > last_high['price']:
-            return "CHoCH_Bullish"
-            
-        return None
-
-    def check_liquidity_sweep(self, data, swings, bias):
-        """
-        Checks if a recent high/low was swept (price poked through but reversed or simply took it out).
-        For simplicity in this EA: We look for a recent candle that wicked beyond a Swing Point but closed back inside,
-        OR just a clear take out of a swing point followed by reversal structure.
-        
-        Returns: True/False
-        """
-        # We need a sweep OPPOSITE to the intended trade direction
-        # Buy Setup: Sweep of Sell-side Liquidity (Old Lows)
-        # Sell Setup: Sweep of Buy-side Liquidity (Old Highs)
-        
-        lookback_candles = 20 # Look for sweep in last 20 candles
-        current_idx = len(data['close']) - 1
-        
-        if bias == "Bullish": # Looking for Buy -> Need Sweep of Lows
-            recent_lows = [s for s in swings if s['type'] == 'low' and s['index'] < current_idx - 1]
-            if not recent_lows: return False
-            
-            # Check last significant low
-            target_low = recent_lows[-1]['price']
-            
-            # Did we trade below it recently?
-            lowest_recent = np.min(data['low'][current_idx-lookback_candles : current_idx])
-            if lowest_recent < target_low:
-                return True # Liquidity taken
-                
-        elif bias == "Bearish": # Looking for Sell -> Need Sweep of Highs
-            recent_highs = [s for s in swings if s['type'] == 'high' and s['index'] < current_idx - 1]
-            if not recent_highs: return False
-            
-            target_high = recent_highs[-1]['price']
-            
-            highest_recent = np.max(data['high'][current_idx-lookback_candles : current_idx])
-            if highest_recent > target_high:
-                return True # Liquidity taken
-                
-        return False
-
-    def get_premium_discount(self, data, swings, bias):
-        """
-        Returns True if price is in Discount (for Buy) or Premium (for Sell).
-        Uses range between Last Major High and Last Major Low.
-        """
-        if len(swings) < 2: return False
-        
-        # Simple Range: Max High to Min Low of recent structure
-        # In a real impulse leg, we take the low that started the move to the high.
-        
-        last_high = [s for s in swings if s['type'] == 'high'][-1]['price']
-        last_low = [s for s in swings if s['type'] == 'low'][-1]['price']
-        
-        current_price = data['close'][-1]
-        r = last_high - last_low
-        if r == 0: return False
-        
-        fib_level = (current_price - last_low) / r
-        
-        if bias == "Bullish":
-            # Buy in Discount (< 0.5)
-            return fib_level < 0.5
-        elif bias == "Bearish":
-            # Sell in Premium (> 0.5)
-            return fib_level > 0.5
-            
-        return False
-
-    def find_fvg(self, data, bias):
-        """
-        Finds the nearest VALID FVG to current price.
-        Returns: (top, bottom, index) or None
-        """
-        # Scan backwards for unmitigated FVG
-        l = len(data['close'])
-        
-        for i in range(l - 2, l - 50, -1):
-            if bias == "Bullish":
-                # Candle i is the FVG candle. Gap between High[i-1] and Low[i+1]?
-                # Note: Array is chronological. i is "current" in loop. 
-                # Gap is between i-1 (left) and i+1 (right)??? 
-                # Standard FVG: Candle 1 High < Candle 3 Low. Gap is 1 High to 3 Low.
-                # Let's map indices: 1=i-1, 2=i, 3=i+1.
-                # Actually, if we loop backwards, 'i' is the middle candle.
-                
-                c1_high = data['high'][i-1]
-                c3_low = data['low'][i+1]
-                
-                if c1_high < c3_low: # Gap exists
-                    # Check mitigation
-                    # Has price since 'i+1' traded into this zone?
-                    # Zone: c1_high to c3_low.
-                    # We only care if we are currently potentially IN or NEAR it.
-                    return (c3_low, c1_high, i)
-                    
-            elif bias == "Bearish":
-                # Candle 1 Low > Candle 3 High.
-                c1_low = data['low'][i-1]
-                c3_high = data['high'][i+1]
-                
-                if c1_low > c3_high:
-                    return (c1_low, c3_high, i)
-        
-        return None
-
-    def find_ob(self, data, bias):
-        """
-        Finds nearest Order Block.
-        Bullish OB: Last Bearish candle before strong up move.
-        Bearish OB: Last Bullish candle before strong down move.
-        """
-        l = len(data['close'])
-        
-        for i in range(l - 3, l - 50, -1):
-            if bias == "Bullish":
-                # Look for Bearish Candle
-                if data['close'][i] < data['open'][i]:
-                    # Check for strong displacement after (next candle Bullish and engulfing or strong)
-                    if data['close'][i+1] > data['open'][i+1] and data['close'][i+1] > data['high'][i]:
-                        return (data['high'][i], data['low'][i], i)
-                        
-            elif bias == "Bearish":
-                # Look for Bullish Candle
-                if data['close'][i] > data['open'][i]:
-                    # Check for strong displacement down
-                    if data['close'][i+1] < data['open'][i+1] and data['close'][i+1] < data['low'][i]:
-                        return (data['high'][i], data['low'][i], i)
-        return None
+        self.risk_percent = self._safe_float(risk_percent, 1.0)
+        self.rr_ratio = max(self._safe_float(rr_ratio, 2.0), MIN_RR)
+        self.name = name
 
     def execute(self):
-        # 1. HTF Analysis (H1) for Bias
-        h1_data = self.get_data(mt5.TIMEFRAME_H1, 200)
-        if not h1_data: return
-        h1_swings = self.find_swings(h1_data)
-        htf_bias, _, _ = self.get_market_structure(h1_swings)
-        
-        if htf_bias == "Uncertain" or htf_bias == "Ranging":
-            self.worker.signals.update_status.emit(f"SMC: HTF Bias Uncertain ({htf_bias})", "orange")
+        if not self._market_is_tradeable():
             return
 
-        # 2. LTF Analysis (Entry Timeframe)
-        ltf_data = self.get_data(self.timeframe, 200)
-        if not ltf_data: return
-        ltf_swings = self.find_swings(ltf_data)
-        
-        # 3. Check Liquidity Sweep (Has liquidity been taken recently?)
-        # For a Buy, we want to see Sell-side liquidity (Lows) swept.
-        liquidity_swept = self.check_liquidity_sweep(ltf_data, ltf_swings, htf_bias)
-        
-        # 4. Check Premium/Discount
-        in_zone = self.get_premium_discount(ltf_data, ltf_swings, htf_bias)
-        
-        current_price = ltf_data['close'][-1]
-        self.worker.signals.update_status.emit(f"SMC: Bias={htf_bias} | LiqSweep={liquidity_swept} | Zone={in_zone}", "cyan")
-        
-        # CONDITIONS COMBINATION
-        # We need: HTF Bias + Liquidity Sweep + Discount/Premium Zone + Tap into OB/FVG
-        
-        if not liquidity_swept: return # Strict liquidity rule
-        if not in_zone: return # Strict P/D rule
-        
-        signal_type = None
-        stop_loss = 0.0
-        
-        # 5. Find Entry Point (FVG or OB)
-        if htf_bias == "Bullish":
-            # Look for Bullish FVG or OB
-            fvg = self.find_fvg(ltf_data, "Bullish")
-            ob = self.find_ob(ltf_data, "Bullish")
-            
-            # Check if current price is inside/touching FVG or OB
-            # Prioritize FVG
-            entry_found = False
-            
-            if fvg:
-                top, bottom, _ = fvg
-                # If price dipped into FVG
-                if bottom <= current_price <= top * 1.02: # Tolerance
-                    signal_type = "Buy"
-                    stop_loss = bottom - (top - bottom) # Buffer below
-                    entry_found = True
-            
-            if not entry_found and ob:
-                top, bottom, _ = ob
-                if bottom <= current_price <= top * 1.02:
-                    signal_type = "Buy"
-                    stop_loss = bottom - (top-bottom)*0.5
-                    entry_found = True
+        htf = self.get_data(HTF_TIMEFRAME, MAX_LOOKBACK)
+        ltf = self.get_data(self.timeframe, MAX_LOOKBACK)
+        if htf is None or ltf is None:
+            self._status("Waiting for enough candles.", "orange")
+            return
 
-        elif htf_bias == "Bearish":
-            fvg = self.find_fvg(ltf_data, "Bearish")
-            ob = self.find_ob(ltf_data, "Bearish")
-            
-            entry_found = False
-            
-            if fvg:
-                top, bottom, _ = fvg
-                if bottom * 0.98 <= current_price <= top:
-                    signal_type = "Sell"
-                    stop_loss = top + (top-bottom)
-                    entry_found = True
-            
-            if not entry_found and ob:
-                top, bottom, _ = ob
-                if bottom * 0.98 <= current_price <= top:
-                    signal_type = "Sell"
-                    stop_loss = top + (top-bottom)*0.5
-                    entry_found = True
+        atr = self.calculate_atr(ltf)
+        if atr is None or atr <= 0:
+            self._status("Waiting for volatility data.", "orange")
+            return
 
-        # Execute
-        if signal_type:
-            # Check existing action to avoid spam
-            if self.worker.last_trade_action == signal_type: return
+        if not self._passes_volatility_filter(ltf, atr):
+            self._status("Low volatility. No trade.", "orange")
+            return
 
-            # Calculate TP
-            dist_to_sl = abs(current_price - stop_loss)
-            if dist_to_sl == 0: dist_to_sl = 0.5 # Safety
-            
-            tp_dist = dist_to_sl * self.rr_ratio
-            tp = current_price + tp_dist if signal_type == "Buy" else current_price - tp_dist
-            
-            # Calculate Volume
-            volume = self.calculate_volume(dist_to_sl)
-            
-            self.worker.last_trade_action = signal_type
-            self.worker.execute_trade(signal_type, is_auto=True, sl_price=stop_loss, tp_price=tp, volume=volume)
-            self.worker.signals.update_status.emit(f"SMC: {signal_type} Executed! Vol={volume}", "green")
+        htf_swings = self.find_swings(htf)
+        ltf_swings = self.find_swings(ltf)
+        bias = self.get_market_bias(htf, htf_swings)
+        if bias not in ("Bullish", "Bearish"):
+            self._status(f"HTF bias not clean ({bias}).", "orange")
+            return
+
+        if self._daily_trade_count() >= MAX_TRADES_PER_DAY:
+            self._status(f"Daily trade limit reached ({MAX_TRADES_PER_DAY}).", "orange")
+            return
+
+        liquidity = self.detect_liquidity_sweep(ltf, ltf_swings, bias, atr)
+        mss = self.detect_mss_after_sweep(ltf, ltf_swings, liquidity) if liquidity else None
+        in_pd = self.in_premium_discount(ltf, ltf_swings, bias)
+
+        self._status(
+            f"{self.name}: Bias={bias} | Sweep={bool(liquidity)} | MSS={bool(mss)} | PD={in_pd}",
+            "cyan",
+        )
+
+        if not liquidity or not mss or not in_pd:
+            return
+
+        entry = self.select_entry_zone(ltf, liquidity, mss, bias, atr)
+        if entry is None:
+            return
+
+        signal = "Buy" if bias == "Bullish" else "Sell"
+        current_price = float(ltf.close[-1])
+        stop_loss = self.calculate_stop_loss(entry, liquidity, signal, atr)
+        if not self._valid_stop(signal, current_price, stop_loss):
+            return
+
+        tp = self.calculate_take_profit(ltf, ltf_swings, signal, current_price, stop_loss)
+        volume = self.calculate_volume(abs(current_price - stop_loss))
+        if volume <= 0:
+            self._status("Volume calculation failed.", "red")
+            return
+
+        if self._has_open_direction(signal):
+            self._status(f"{self.name}: Existing {signal} position. Waiting.", "orange")
+            return
+
+        if self.worker.last_trade_action == signal:
+            return
+
+        result = self.worker.execute_trade(
+            signal,
+            is_auto=True,
+            sl_price=stop_loss,
+            tp_price=tp,
+            volume=volume,
+        )
+        if result is not False:
+            self.worker.last_trade_action = signal
+            self._status(
+                f"{self.name}: {signal} {entry.kind} entry | Vol={volume:.2f} | SL={stop_loss:.2f} | TP={tp:.2f}",
+                "green",
+            )
+
+    def get_data(self, timeframe, count):
+        rates = mt5.copy_rates_from_pos(self.symbol, timeframe, 0, count)
+        if rates is None or len(rates) < max(120, count // 2):
+            return None
+        return MarketData(
+            time=[datetime.fromtimestamp(int(r["time"])) for r in rates],
+            open=np.array([r["open"] for r in rates], dtype=float),
+            high=np.array([r["high"] for r in rates], dtype=float),
+            low=np.array([r["low"] for r in rates], dtype=float),
+            close=np.array([r["close"] for r in rates], dtype=float),
+            tick_volume=np.array([r["tick_volume"] for r in rates], dtype=float),
+            spread=np.array([r["spread"] for r in rates], dtype=float),
+        )
+
+    def find_swings(self, data):
+        swings = []
+        for i in range(SWING_LOOKBACK, len(data.close) - SWING_LOOKBACK):
+            left_high = data.high[i - SWING_LOOKBACK : i]
+            right_high = data.high[i + 1 : i + SWING_LOOKBACK + 1]
+            left_low = data.low[i - SWING_LOOKBACK : i]
+            right_low = data.low[i + 1 : i + SWING_LOOKBACK + 1]
+            if data.high[i] > np.max(left_high) and data.high[i] >= np.max(right_high):
+                swings.append(Swing(i, float(data.high[i]), "high"))
+            if data.low[i] < np.min(left_low) and data.low[i] <= np.min(right_low):
+                swings.append(Swing(i, float(data.low[i]), "low"))
+        return swings
+
+    def get_market_bias(self, data, swings):
+        highs = [s for s in swings if s.type == "high"]
+        lows = [s for s in swings if s.type == "low"]
+        if len(highs) < 2 or len(lows) < 2:
+            return "Uncertain"
+
+        hh = highs[-1].price > highs[-2].price
+        hl = lows[-1].price > lows[-2].price
+        lh = highs[-1].price < highs[-2].price
+        ll = lows[-1].price < lows[-2].price
+
+        if hh and hl:
+            return "Bullish"
+        if lh and ll:
+            return "Bearish"
+
+        current_close = float(data.close[-1])
+        if current_close > highs[-1].price and lows[-1].price >= lows[-2].price:
+            return "Bullish"
+        if current_close < lows[-1].price and highs[-1].price <= highs[-2].price:
+            return "Bearish"
+        return "Ranging"
+
+    def detect_liquidity_sweep(self, data, swings, bias, atr):
+        start = max(10, len(data.close) - SETUP_LOOKBACK)
+        tolerance = max(atr * 0.08, self._point() * 5)
+        previous_day = self._previous_day_levels()
+
+        levels = []
+        if bias == "Bullish":
+            levels.extend(("swing low", s.price) for s in swings if s.type == "low" and s.index < len(data.close) - 3)
+            levels.extend(("equal lows", price) for price in self.find_equal_liquidity(swings, "low", tolerance))
+            if previous_day:
+                levels.append(("previous day low", previous_day[0]))
+
+            for i in range(start, len(data.close)):
+                for source, level in levels:
+                    swept = data.low[i] < level - tolerance
+                    reclaimed = data.close[i] > level
+                    if swept and reclaimed:
+                        return LiquidityEvent("sell-side", float(level), i, source)
+
+        if bias == "Bearish":
+            levels.extend(("swing high", s.price) for s in swings if s.type == "high" and s.index < len(data.close) - 3)
+            levels.extend(("equal highs", price) for price in self.find_equal_liquidity(swings, "high", tolerance))
+            if previous_day:
+                levels.append(("previous day high", previous_day[1]))
+
+            for i in range(start, len(data.close)):
+                for source, level in levels:
+                    swept = data.high[i] > level + tolerance
+                    reclaimed = data.close[i] < level
+                    if swept and reclaimed:
+                        return LiquidityEvent("buy-side", float(level), i, source)
+
+        return None
+
+    def find_equal_liquidity(self, swings, swing_type, tolerance):
+        matching = [s for s in swings if s.type == swing_type]
+        levels = []
+        for i in range(1, len(matching)):
+            if abs(matching[i].price - matching[i - 1].price) <= tolerance:
+                levels.append((matching[i].price + matching[i - 1].price) / 2.0)
+        return levels[-4:]
+
+    def detect_mss_after_sweep(self, data, swings, liquidity):
+        if liquidity is None:
+            return None
+
+        post_sweep = [s for s in swings if s.index < liquidity.sweep_index]
+        if liquidity.side == "sell-side":
+            highs = [s for s in post_sweep if s.type == "high"]
+            if not highs:
+                return None
+            break_level = highs[-1].price
+            for i in range(liquidity.sweep_index + 1, len(data.close)):
+                if data.close[i] > break_level:
+                    return StructureShift("Bullish", i, break_level, "CHoCH/MSS")
+
+        if liquidity.side == "buy-side":
+            lows = [s for s in post_sweep if s.type == "low"]
+            if not lows:
+                return None
+            break_level = lows[-1].price
+            for i in range(liquidity.sweep_index + 1, len(data.close)):
+                if data.close[i] < break_level:
+                    return StructureShift("Bearish", i, break_level, "CHoCH/MSS")
+
+        return None
+
+    def in_premium_discount(self, data, swings, bias):
+        highs = [s for s in swings if s.type == "high"]
+        lows = [s for s in swings if s.type == "low"]
+        if not highs or not lows:
+            return False
+
+        if bias == "Bullish":
+            recent_high = highs[-1]
+            prior_lows = [s for s in lows if s.index < recent_high.index]
+            if not prior_lows:
+                return False
+            low = prior_lows[-1].price
+            high = recent_high.price
+        else:
+            recent_low = lows[-1]
+            prior_highs = [s for s in highs if s.index < recent_low.index]
+            if not prior_highs:
+                return False
+            high = prior_highs[-1].price
+            low = recent_low.price
+
+        if high <= low:
+            return False
+
+        current = float(data.close[-1])
+        position = (current - low) / (high - low)
+        if bias == "Bullish":
+            return 0.21 <= position <= 0.50
+        return 0.50 <= position <= 0.79
+
+    def select_entry_zone(self, data, liquidity, mss, bias, atr):
+        zones = self.find_fvg_zones(data, bias, liquidity.sweep_index, mss.break_index)
+        zones.extend(self.find_order_blocks(data, bias, liquidity.sweep_index, mss.break_index, atr))
+        current = float(data.close[-1])
+        active = [z for z in zones if z.bottom <= current <= z.top]
+        if not active:
+            return None
+
+        active.sort(key=lambda z: (0 if z.kind == "FVG" else 1, -z.index))
+        return active[0]
+
+    def find_fvg_zones(self, data, bias, sweep_index, break_index):
+        zones = []
+        start = max(2, sweep_index)
+        end = min(len(data.close) - 2, max(break_index + 8, sweep_index + 3))
+        for i in range(start, end):
+            if bias == "Bullish" and data.high[i - 1] < data.low[i + 1]:
+                bottom = float(data.high[i - 1])
+                top = float(data.low[i + 1])
+                if not self._zone_invalidated(data, "Bullish", top, bottom, i + 1):
+                    zones.append(Zone("FVG", "Bullish", top, bottom, i))
+            elif bias == "Bearish" and data.low[i - 1] > data.high[i + 1]:
+                top = float(data.low[i - 1])
+                bottom = float(data.high[i + 1])
+                if not self._zone_invalidated(data, "Bearish", top, bottom, i + 1):
+                    zones.append(Zone("FVG", "Bearish", top, bottom, i))
+        return zones
+
+    def find_order_blocks(self, data, bias, sweep_index, break_index, atr):
+        zones = []
+        displacement_min = atr * 0.8
+        start = max(1, sweep_index)
+        end = min(break_index + 1, len(data.close) - 1)
+        for i in range(end - 1, start - 1, -1):
+            body = abs(data.close[i + 1] - data.open[i + 1])
+            if body < displacement_min:
+                continue
+            if bias == "Bullish" and data.close[i] < data.open[i] and data.close[i + 1] > data.high[i]:
+                zones.append(Zone("OB", "Bullish", float(data.open[i]), float(data.low[i]), i))
+                break
+            if bias == "Bearish" and data.close[i] > data.open[i] and data.close[i + 1] < data.low[i]:
+                zones.append(Zone("OB", "Bearish", float(data.high[i]), float(data.open[i]), i))
+                break
+        return zones
+
+    def calculate_stop_loss(self, zone, liquidity, signal, atr):
+        buffer = max(atr * 0.15, self._point() * 20)
+        if signal == "Buy":
+            return min(zone.bottom, liquidity.level) - buffer
+        return max(zone.top, liquidity.level) + buffer
+
+    def calculate_take_profit(self, data, swings, signal, entry, stop_loss):
+        fixed_rr_target = entry + abs(entry - stop_loss) * self.rr_ratio if signal == "Buy" else entry - abs(entry - stop_loss) * self.rr_ratio
+        if signal == "Buy":
+            highs = [s.price for s in swings if s.type == "high" and s.price > entry]
+            liquidity_target = min(highs) if highs else fixed_rr_target
+            return max(fixed_rr_target, liquidity_target)
+        lows = [s.price for s in swings if s.type == "low" and s.price < entry]
+        liquidity_target = max(lows) if lows else fixed_rr_target
+        return min(fixed_rr_target, liquidity_target)
+
+    def calculate_atr(self, data, period=14):
+        if len(data.close) < period + 2:
+            return None
+        prev_close = data.close[:-1]
+        high = data.high[1:]
+        low = data.low[1:]
+        tr = np.maximum(high - low, np.maximum(abs(high - prev_close), abs(low - prev_close)))
+        return float(np.mean(tr[-period:]))
 
     def calculate_volume(self, sl_distance):
         try:
             account = mt5.account_info()
             symbol_info = mt5.symbol_info(self.symbol)
-            if not account or not symbol_info: return 0.01
-            
-            balance = account.balance
-            risk_amount = balance * (self.risk_percent / 100.0)
-            
-            tick_value = symbol_info.trade_tick_value
-            tick_size = symbol_info.trade_tick_size
-            
-            # Standard formula: Volume = Risk / (SL_Points * TickVal)
-            # SL Distance is in Price. Points = SL_Dist / TickSize
-            if sl_distance <= 0: return 0.01
-            
-            points_at_risk = sl_distance / tick_size
-            # Rough approx for XAUUSD if tick_value is standard
-            # Better generic: Risk / (SL_Dist * ContractSize) * ...
-            
+            if not account or not symbol_info or sl_distance <= 0:
+                return 0.0
+
+            risk_amount = account.balance * (self.risk_percent / 100.0)
             contract_size = symbol_info.trade_contract_size
-            # Profit = (Close - Open) * Volume * ContractSize
-            # Risk = SL_Dist * Vol * Contract
-            # Vol = Risk / (SL_Dist * Contract)
-            
-            raw_vol = risk_amount / (sl_distance * contract_size)
-            
-            step = symbol_info.volume_step
-            vol = round(raw_vol / step) * step
-            vol = max(symbol_info.volume_min, min(symbol_info.volume_max, vol))
-            return vol
-        except:
-            return 0.01
+            if contract_size <= 0:
+                return 0.0
+
+            raw_volume = risk_amount / (sl_distance * contract_size)
+            step = symbol_info.volume_step or 0.01
+            volume = round(raw_volume / step) * step
+            volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
+            return round(volume, 2)
+        except Exception:
+            return 0.0
+
+    def _market_is_tradeable(self):
+        symbol_info = mt5.symbol_info(self.symbol)
+        tick = mt5.symbol_info_tick(self.symbol)
+        if not symbol_info or not tick:
+            self._status(f"Symbol not available: {self.symbol}", "red")
+            return False
+        if not symbol_info.visible:
+            mt5.symbol_select(self.symbol, True)
+        if symbol_info.spread > MAX_SPREAD_POINTS:
+            self._status(f"Spread too high ({symbol_info.spread}).", "orange")
+            return False
+        return True
+
+    def _passes_volatility_filter(self, data, atr):
+        recent_range = float(np.mean(data.high[-10:] - data.low[-10:]))
+        return recent_range >= atr * 0.35
+
+    def _zone_invalidated(self, data, direction, top, bottom, created_index):
+        if created_index >= len(data.close) - 1:
+            return False
+        later_closes = data.close[created_index + 1 : -1]
+        if len(later_closes) == 0:
+            return False
+        if direction == "Bullish":
+            return bool(np.any(later_closes < bottom))
+        return bool(np.any(later_closes > top))
+
+    def _previous_day_levels(self):
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_D1, 1, 1)
+        if rates is None or len(rates) == 0:
+            return None
+        return float(rates[0]["low"]), float(rates[0]["high"])
+
+    def _daily_trade_count(self):
+        try:
+            now = datetime.now(timezone.utc)
+            start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
+            deals = mt5.history_deals_get(start, now + timedelta(minutes=1))
+            if not deals:
+                return 0
+            return sum(1 for d in deals if getattr(d, "magic", None) == MAGIC and getattr(d, "symbol", "") == self.symbol)
+        except Exception:
+            return 0
+
+    def _has_open_direction(self, signal):
+        positions = mt5.positions_get(symbol=self.symbol, magic=MAGIC)
+        if not positions:
+            return False
+        target_type = mt5.ORDER_TYPE_BUY if signal == "Buy" else mt5.ORDER_TYPE_SELL
+        return any(pos.type == target_type for pos in positions)
+
+    def _valid_stop(self, signal, entry, stop_loss):
+        if signal == "Buy":
+            return stop_loss < entry
+        return stop_loss > entry
+
+    def _point(self):
+        info = mt5.symbol_info(self.symbol)
+        return float(info.point) if info and info.point else 0.01
+
+    def _safe_float(self, value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _status(self, message, color):
+        self.worker.signals.update_status.emit(f"{self.name}: {message}" if not message.startswith(self.name) else message, color)
+
+
+class ICTTrader(SMCTrader):
+    def __init__(self, worker, symbol, timeframe, risk_percent=1.0, rr_ratio=2.0):
+        super().__init__(worker, symbol, timeframe, risk_percent, rr_ratio, name="ICT")
+
 
 def run_smc_logic(worker, symbol, timeframe, risk_percent, rr_ratio):
     try:
-        trader = SMCTrader(worker, symbol, timeframe, risk_percent, rr_ratio)
-        trader.execute()
+        SMCTrader(worker, symbol, timeframe, risk_percent, rr_ratio).execute()
     except Exception as e:
-        worker.signals.update_status.emit(f"SMC Error: {str(e)}", "red")
+        worker.signals.update_status.emit(f"SMC Error: {e}", "red")
+
+
+def run_ict_logic(worker, symbol, timeframe, risk_percent=1.0, rr_ratio=2.0):
+    try:
+        ICTTrader(worker, symbol, timeframe, risk_percent, rr_ratio).execute()
+    except Exception as e:
+        worker.signals.update_status.emit(f"ICT Error: {e}", "red")

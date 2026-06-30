@@ -121,7 +121,7 @@ class BackendWorker(QRunnable):
             open_positions = mt5.positions_get(magic=234000)
             if open_positions and len(open_positions) >= max_pos:
                 self.signals.update_status.emit(f"Max positions ({max_pos}) reached. Signal ignored.", "orange")
-                return
+                return False
 
             tp_val = self.strategy_params['tp']; sl_val = self.strategy_params['sl']
             
@@ -131,12 +131,12 @@ class BackendWorker(QRunnable):
                 
         except (ValueError, TypeError, KeyError):
             self.signals.show_message.emit("Error", "Invalid Risk Management values.")
-            return
+            return False
 
         tick = mt5.symbol_info_tick(self.symbol)
         if not tick:
             self.signals.show_message.emit("Error", f"Could not get price for {self.symbol}")
-            return
+            return False
         
         price = tick.ask if trade_type == "Buy" else tick.bid
         
@@ -155,11 +155,13 @@ class BackendWorker(QRunnable):
         
         if not position_id:
             if not is_auto: self.signals.show_message.emit("Order Failed", f"Order failed: {result.comment if result else 'Unknown'}")
+            return False
         else:
             if not is_auto: self.signals.show_message.emit("Success", f"{trade_type} order placed.")
             trade_source = f"Auto {trade_type}" if is_auto else f"Manual {trade_type}"
             trade_values = {"ticket": position_id, "type": trade_source, "price": f"{price:.2f}", "tp": f"{tp:.2f}", "sl": f"{sl:.2f}"}
             self.signals.add_open_trade.emit(trade_values)
+            return True
 
     def strategy_main_loop(self):
         while True:
@@ -855,8 +857,10 @@ class MainWindow(QMainWindow):
 
                 params['strategy'] = self.strategy_combo.currentText()
                 params['timeframe'] = self.worker.timeframe_map[self.timeframe_combo.currentText()]
-                if self.param1_input.isEnabled(): params['param1'] = int(self.param1_input.text())
-                if self.param2_input.isEnabled(): params['param2'] = int(self.param2_input.text())
+                if self.param1_input.isEnabled():
+                    params['param1'] = float(self.param1_input.text()) if params['strategy'] in ("SMC", "ICT Trader") else int(self.param1_input.text())
+                if self.param2_input.isEnabled():
+                    params['param2'] = float(self.param2_input.text()) if params['strategy'] in ("SMC", "ICT Trader") else int(self.param2_input.text())
                 if self.param3_input.isEnabled(): params['param3'] = int(self.param3_input.text())
                 
                 # Include Scalper EMA if set, default to 21
@@ -887,7 +891,7 @@ class MainWindow(QMainWindow):
 
         # Strategies that calculate their own Lot Size, TP, and SL internally
         # We disable these inputs to prevent confusion, as user values here are ignored.
-        uses_internal_risk = (is_smc or is_gold_new)
+        uses_internal_risk = (is_smc or is_ict or is_gold_new)
         
         self.lot_size_input.setEnabled(not uses_internal_risk)
         self.tp_input.setEnabled(not uses_internal_risk)
@@ -905,7 +909,7 @@ class MainWindow(QMainWindow):
                     self.apply_scalper_settings(dialog.get_settings())
 
         # Disable parameter inputs for ICT strategies and Gold Scalping New
-        params_enabled = not (is_scalper or is_ict or is_ict_scalper or is_gold_new)
+        params_enabled = not (is_scalper or is_ict_scalper or is_gold_new)
         # Re-enable for SMC but with specific meanings
         if is_smc: params_enabled = True
 
@@ -925,7 +929,7 @@ class MainWindow(QMainWindow):
             elif strategy == "Trend Following":
                 self.param1_label.setText("Signal MA Period:")
                 self.param2_label.setText("Trend MA Period:")
-            elif strategy == "SMC":
+            elif strategy in ("SMC", "ICT Trader"):
                 self.param1_label.setText("Risk (%):")
                 self.param2_label.setText("RR Ratio:")
                 self.param1_input.setText("1")
