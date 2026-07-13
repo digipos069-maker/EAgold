@@ -1,7 +1,7 @@
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import queue
 import signal
 import json
@@ -33,6 +33,7 @@ class WorkerSignals(QObject):
     add_open_trade = Signal(dict)
     update_pl = Signal(str, float) # Changed ticket to str to handle large 64-bit IDs
     move_to_history = Signal(dict)
+    add_history_trade = Signal(dict)
     show_message = Signal(str, str)
 
 # --- Backend Logic Worker ---
@@ -107,9 +108,12 @@ class BackendWorker(QRunnable):
             time.sleep(1)
 
     def sync_trade_history(self):
+        if not hasattr(self, 'history_synced_tickets'):
+            self.history_synced_tickets = set()
+            
         while True:
             try:
-                open_positions = mt5.positions_get(symbol=self.symbol)
+                open_positions = mt5.positions_get() # Fetch ALL symbols
                 server_positions = {pos.ticket: pos for pos in open_positions} if open_positions else {}
                 server_tickets = set(server_positions.keys())
                 
@@ -122,7 +126,7 @@ class BackendWorker(QRunnable):
                     source = "Auto" if getattr(pos, 'magic', 0) == 234000 else "Manual MT5"
                     trade_values = {
                         "ticket": ticket,
-                        "type": f"{source} {trade_type}",
+                        "type": f"{source} {trade_type} ({pos.symbol})",
                         "price": f"{pos.price_open:.2f}",
                         "tp": f"{pos.tp:.2f}",
                         "sl": f"{pos.sl:.2f}"
@@ -140,6 +144,41 @@ class BackendWorker(QRunnable):
                 for ticket in still_open_tickets:
                     profit = server_positions[ticket].profit
                     self.signals.update_pl.emit(str(ticket), profit) # Emit ticket as string
+                
+                # --- Fetch Today's History ---
+                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                deals = mt5.history_deals_get(today_start, datetime.now() + timedelta(days=1))
+                if deals:
+                    for d in deals:
+                        if d.entry == 1: # mt5.DEAL_ENTRY_OUT, for ALL symbols
+                            ticket = d.position_id
+                            if ticket not in self.history_synced_tickets:
+                                self.history_synced_tickets.add(ticket)
+                                pos_deals = mt5.history_deals_get(position=ticket)
+                                final_pl = sum(pd.profit + pd.swap + pd.commission for pd in pos_deals) if pos_deals else 0.0
+                                
+                                pos_orders = mt5.history_orders_get(position=ticket)
+                                trade_type = "Unknown"
+                                price = "0.00"
+                                tp = "0.00"
+                                sl = "0.00"
+                                if pos_orders:
+                                    first_order = pos_orders[0]
+                                    trade_type_str = "Buy" if first_order.type == mt5.ORDER_TYPE_BUY else "Sell"
+                                    source = "Auto" if first_order.magic == 234000 else "Manual MT5"
+                                    trade_type = f"{source} {trade_type_str} ({d.symbol})"
+                                    price = f"{first_order.price_open:.2f}"
+                                    tp = f"{first_order.tp:.2f}"
+                                    sl = f"{first_order.sl:.2f}"
+                                    
+                                self.signals.add_history_trade.emit({
+                                    "ticket": ticket,
+                                    "type": trade_type,
+                                    "price": price,
+                                    "tp": tp,
+                                    "sl": sl,
+                                    "final_pl": final_pl
+                                })
 
             except Exception as e:
                 print(f"Error in history sync: {e}")
@@ -634,6 +673,7 @@ class MainWindow(QMainWindow):
         self.open_positions_model = QStandardItemModel()
         self.closed_trades_model = QStandardItemModel()
         self.gui_open_tickets = set()
+        self.gui_history_tickets = set()
 
         self._create_ui()
         self._start_backend()
@@ -742,8 +782,10 @@ class MainWindow(QMainWindow):
         self.update_ui_for_strategy()
 
         tabs = QTabWidget()
-        open_tab, closed_tab = QWidget(), QWidget()
-        tabs.addTab(open_tab, "Open Positions"); tabs.addTab(closed_tab, "Trade History")
+        open_tab, closed_tab, summary_tab = QWidget(), QWidget(), QWidget()
+        tabs.addTab(open_tab, "Open Positions")
+        tabs.addTab(closed_tab, "Trade History")
+        tabs.addTab(summary_tab, "Trade Summary")
         
         self.open_view = QTableView(); self.open_view.setModel(self.open_positions_model)
         self.setup_table_view(self.open_view, self.open_positions_model, ["Ticket", "Type", "Price", "TP", "SL", "P/L ($)"])
@@ -752,6 +794,34 @@ class MainWindow(QMainWindow):
         self.closed_view = QTableView(); self.closed_view.setModel(self.closed_trades_model)
         self.setup_table_view(self.closed_view, self.closed_trades_model, ["Ticket", "Type", "Price", "TP", "SL", "Final P/L", "Status"])
         closed_layout = QVBoxLayout(closed_tab); closed_layout.addWidget(self.closed_view)
+        
+        # --- Trade Summary Tab ---
+        summary_layout = QVBoxLayout(summary_tab)
+        summary_layout.setAlignment(Qt.AlignTop)
+        summary_layout.setSpacing(20)
+        summary_layout.setContentsMargins(40, 40, 40, 40)
+
+        title = QLabel("Today's Trade Summary")
+        title.setStyleSheet("color: #4CAF50; font-size: 16pt; font-weight: bold;")
+        title.setAlignment(Qt.AlignCenter)
+        summary_layout.addWidget(title)
+        
+        self.summary_labels = {}
+        metrics = ["Total Trades", "Wins", "Losses", "Win Rate", "Net P/L"]
+        for m in metrics:
+            row = QHBoxLayout()
+            lbl_title = QLabel(f"{m}:")
+            lbl_title.setStyleSheet("color: #e0e0e0; font-size: 12pt; font-weight: bold;")
+            lbl_val = QLabel("0")
+            if m == "Win Rate": lbl_val.setText("0.0%")
+            elif m == "Net P/L": lbl_val.setText("$0.00")
+            lbl_val.setStyleSheet("color: #ffffff; font-size: 14pt; font-weight: bold;")
+            lbl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(lbl_title)
+            row.addStretch()
+            row.addWidget(lbl_val)
+            self.summary_labels[m] = lbl_val
+            summary_layout.addLayout(row)
         
         layout.addWidget(tabs)
 
@@ -790,6 +860,7 @@ class MainWindow(QMainWindow):
         self.worker.signals.add_open_trade.connect(self.add_open_trade)
         self.worker.signals.update_pl.connect(self.update_pl)
         self.worker.signals.move_to_history.connect(self.move_to_history)
+        self.worker.signals.add_history_trade.connect(self.add_history_trade)
         self.worker.signals.show_message.connect(self.show_message)
         self.threadpool.start(self.worker)
 
@@ -831,6 +902,7 @@ class MainWindow(QMainWindow):
         if ticket not in self.gui_open_tickets: return
         self.gui_open_tickets.remove(ticket)
         self.worker.strategy_params['gui_tickets'] = self.gui_open_tickets
+        self.gui_history_tickets.add(ticket)
         for row in range(self.open_positions_model.rowCount()):
             if int(self.open_positions_model.item(row, 0).text()) == ticket:
                 trade_row = [self.open_positions_model.item(row, col).clone() for col in range(self.open_positions_model.columnCount())]
@@ -861,7 +933,69 @@ class MainWindow(QMainWindow):
                 
                 self.closed_trades_model.appendRow(trade_row)
                 self.open_positions_model.removeRow(row)
+                self.update_trade_summary()
                 break
+
+    @Slot(dict)
+    def add_history_trade(self, data):
+        ticket = data['ticket']
+        if ticket in self.gui_history_tickets: return
+        self.gui_history_tickets.add(ticket)
+        
+        final_pl = data['final_pl']
+        color = QColor("#4CAF50") if final_pl >= 0 else QColor("#d32f2f")
+        status_text = "WIN" if final_pl >= 0 else "LOSS"
+        
+        pl_item = QStandardItem(f"{final_pl:+.2f}")
+        pl_item.setForeground(color)
+        pl_item.setTextAlignment(Qt.AlignCenter)
+        
+        status_item = QStandardItem(status_text)
+        status_item.setForeground(QColor("white"))
+        status_item.setBackground(color)
+        status_item.setTextAlignment(Qt.AlignCenter)
+        
+        row = [
+            QStandardItem(str(ticket)),
+            QStandardItem(data.get('type', "Unknown")),
+            QStandardItem(data.get('price', "0.00")),
+            QStandardItem(data.get('tp', "0.00")),
+            QStandardItem(data.get('sl', "0.00")),
+            pl_item,
+            status_item
+        ]
+        self.closed_trades_model.appendRow(row)
+        self.update_trade_summary()
+
+    def update_trade_summary(self):
+        total_trades = self.closed_trades_model.rowCount()
+        wins = 0
+        losses = 0
+        net_pl = 0.0
+        
+        for row in range(total_trades):
+            pl_item = self.closed_trades_model.item(row, 5)
+            if pl_item:
+                try:
+                    pl_val = float(pl_item.text())
+                    net_pl += pl_val
+                    if pl_val >= 0:
+                        wins += 1
+                    else:
+                        losses += 1
+                except ValueError:
+                    pass
+                
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+        
+        self.summary_labels["Total Trades"].setText(str(total_trades))
+        self.summary_labels["Wins"].setText(str(wins))
+        self.summary_labels["Losses"].setText(str(losses))
+        self.summary_labels["Win Rate"].setText(f"{win_rate:.1f}%")
+        
+        pl_lbl = self.summary_labels["Net P/L"]
+        pl_lbl.setText(f"{net_pl:+.2f}")
+        pl_lbl.setStyleSheet(f"color: {'#4CAF50' if net_pl >= 0 else '#d32f2f'}; font-size: 16pt; font-weight: bold;")
 
     @Slot(str, str)
     def show_message(self, title, text):
