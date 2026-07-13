@@ -109,11 +109,25 @@ class BackendWorker(QRunnable):
     def sync_trade_history(self):
         while True:
             try:
-                open_positions = mt5.positions_get(magic=234000)
+                open_positions = mt5.positions_get(symbol=self.symbol)
                 server_positions = {pos.ticket: pos for pos in open_positions} if open_positions else {}
                 server_tickets = set(server_positions.keys())
                 
                 gui_open_tickets = set(self.strategy_params.get('gui_tickets', set()))
+
+                new_tickets = server_tickets - gui_open_tickets
+                for ticket in new_tickets:
+                    pos = server_positions[ticket]
+                    trade_type = "Buy" if pos.type == mt5.ORDER_TYPE_BUY else "Sell"
+                    source = "Auto" if getattr(pos, 'magic', 0) == 234000 else "Manual MT5"
+                    trade_values = {
+                        "ticket": ticket,
+                        "type": f"{source} {trade_type}",
+                        "price": f"{pos.price_open:.2f}",
+                        "tp": f"{pos.tp:.2f}",
+                        "sl": f"{pos.sl:.2f}"
+                    }
+                    self.signals.add_open_trade.emit(trade_values)
 
                 closed_tickets = gui_open_tickets - server_tickets
                 still_open_tickets = gui_open_tickets.intersection(server_tickets)

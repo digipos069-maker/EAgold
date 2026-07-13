@@ -2,7 +2,7 @@
     "tp": "3.0",
     "sl": "2.0",
     "max_pos": "5",
-    "lot_size": "0.01",
+    "lot_size": "0.1",
     "strategy": "ICT Gold Scalping",
     "timeframe": "1 Minute (M1)",
     "start_time": "00:00",
