@@ -1125,9 +1125,9 @@ class MainWindow(QMainWindow):
         self.param2_label.setEnabled(params_enabled)
         self.param2_input.setEnabled(params_enabled)
         
-        # Specific handling for Gold M5 Scalper's param3
-        self.param3_label.setEnabled(is_scalper)
-        self.param3_input.setEnabled(is_scalper)
+        # Specific handling for param3
+        self.param3_label.setEnabled(is_scalper or is_ict_scalper)
+        self.param3_input.setEnabled(is_scalper or is_ict_scalper)
 
         if params_enabled:
             if strategy == "MA Crossover":
@@ -1141,6 +1141,9 @@ class MainWindow(QMainWindow):
                 self.param2_label.setText("RR Ratio:")
                 self.param1_input.setText("1")
                 self.param2_input.setText("2")
+                if is_ict_scalper:
+                    self.param3_label.setText("TP Mode (0=RR, 1=Struct):")
+                    self.param3_input.setText("0")
 
     def apply_scalper_settings(self, settings):
         # Store EMA for the worker (default 21)
