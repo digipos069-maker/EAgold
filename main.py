@@ -31,7 +31,7 @@ class WorkerSignals(QObject):
     update_price = Signal(str)
     update_balance = Signal(str)
     add_open_trade = Signal(dict)
-    update_pl = Signal(str, float) # Changed ticket to str to handle large 64-bit IDs
+    update_live_data = Signal(str, float, float) # ticket_str, current_price, profit
     move_to_history = Signal(dict)
     add_history_trade = Signal(dict)
     show_message = Signal(str, str)
@@ -124,9 +124,12 @@ class BackendWorker(QRunnable):
                     pos = server_positions[ticket]
                     trade_type = "Buy" if pos.type == mt5.ORDER_TYPE_BUY else "Sell"
                     source = "Auto" if getattr(pos, 'magic', 0) == 234000 else "Manual MT5"
+                    trade_date = datetime.fromtimestamp(pos.time).strftime('%H:%M:%S')
                     trade_values = {
                         "ticket": ticket,
+                        "date": trade_date,
                         "type": f"{source} {trade_type} ({pos.symbol})",
+                        "lots": f"{pos.volume:.2f}",
                         "price": f"{pos.price_open:.2f}",
                         "tp": f"{pos.tp:.2f}",
                         "sl": f"{pos.sl:.2f}"
@@ -142,8 +145,8 @@ class BackendWorker(QRunnable):
                     self.signals.move_to_history.emit({"ticket": ticket, "final_pl": final_pl})
 
                 for ticket in still_open_tickets:
-                    profit = server_positions[ticket].profit
-                    self.signals.update_pl.emit(str(ticket), profit) # Emit ticket as string
+                    pos = server_positions[ticket]
+                    self.signals.update_live_data.emit(str(ticket), pos.price_current, pos.profit)
                 
                 # --- Fetch Today's History ---
                 today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -167,13 +170,17 @@ class BackendWorker(QRunnable):
                                     trade_type_str = "Buy" if first_order.type == mt5.ORDER_TYPE_BUY else "Sell"
                                     source = "Auto" if first_order.magic == 234000 else "Manual MT5"
                                     trade_type = f"{source} {trade_type_str} ({d.symbol})"
+                                    trade_date = datetime.fromtimestamp(first_order.time_setup).strftime('%H:%M:%S')
+                                    lots = f"{first_order.volume_initial:.2f}"
                                     price = f"{first_order.price_open:.2f}"
                                     tp = f"{first_order.tp:.2f}"
                                     sl = f"{first_order.sl:.2f}"
                                     
                                 self.signals.add_history_trade.emit({
                                     "ticket": ticket,
+                                    "date": trade_date if 'trade_date' in locals() else "N/A",
                                     "type": trade_type,
+                                    "lots": lots if 'lots' in locals() else "0.00",
                                     "price": price,
                                     "tp": tp,
                                     "sl": sl,
@@ -241,7 +248,16 @@ class BackendWorker(QRunnable):
         else:
             if not is_auto: self.signals.show_message.emit("Success", f"{trade_type} order placed.")
             trade_source = f"Auto {trade_type}" if is_auto else f"Manual {trade_type}"
-            trade_values = {"ticket": position_id, "type": trade_source, "price": f"{price:.2f}", "tp": f"{tp:.2f}", "sl": f"{sl:.2f}"}
+            trade_date = datetime.now().strftime('%H:%M:%S')
+            trade_values = {
+                "ticket": position_id, 
+                "date": trade_date,
+                "type": trade_source, 
+                "lots": f"{float(volume):.2f}",
+                "price": f"{price:.2f}", 
+                "tp": f"{tp:.2f}", 
+                "sl": f"{sl:.2f}"
+            }
             self.signals.add_open_trade.emit(trade_values)
             return True
 
@@ -788,11 +804,11 @@ class MainWindow(QMainWindow):
         tabs.addTab(summary_tab, "Trade Summary")
         
         self.open_view = QTableView(); self.open_view.setModel(self.open_positions_model)
-        self.setup_table_view(self.open_view, self.open_positions_model, ["Ticket", "Type", "Price", "TP", "SL", "P/L ($)"])
+        self.setup_table_view(self.open_view, self.open_positions_model, ["Ticket", "Time", "Type", "Lots", "Entry Price", "Current Price", "TP", "SL", "P/L ($)"])
         open_layout = QVBoxLayout(open_tab); open_layout.addWidget(self.open_view)
 
         self.closed_view = QTableView(); self.closed_view.setModel(self.closed_trades_model)
-        self.setup_table_view(self.closed_view, self.closed_trades_model, ["Ticket", "Type", "Price", "TP", "SL", "Final P/L", "Status"])
+        self.setup_table_view(self.closed_view, self.closed_trades_model, ["Ticket", "Time", "Type", "Lots", "Entry Price", "Close Price", "TP", "SL", "Final P/L", "Status"])
         closed_layout = QVBoxLayout(closed_tab); closed_layout.addWidget(self.closed_view)
         
         # --- Trade Summary Tab ---
@@ -858,7 +874,7 @@ class MainWindow(QMainWindow):
         self.worker.signals.update_price.connect(self.update_price)
         self.worker.signals.update_balance.connect(self.update_balance)
         self.worker.signals.add_open_trade.connect(self.add_open_trade)
-        self.worker.signals.update_pl.connect(self.update_pl)
+        self.worker.signals.update_live_data.connect(self.update_live_data)
         self.worker.signals.move_to_history.connect(self.move_to_history)
         self.worker.signals.add_history_trade.connect(self.add_history_trade)
         self.worker.signals.show_message.connect(self.show_message)
@@ -883,17 +899,28 @@ class MainWindow(QMainWindow):
         if ticket in self.gui_open_tickets: return
         self.gui_open_tickets.add(ticket)
         self.worker.strategy_params['gui_tickets'] = self.gui_open_tickets
-        row = [QStandardItem(str(trade_data['ticket'])), QStandardItem(trade_data['type']), QStandardItem(trade_data['price']), QStandardItem(trade_data['tp']), QStandardItem(trade_data['sl']), QStandardItem("0.00")]
+        row = [
+            QStandardItem(str(trade_data['ticket'])), 
+            QStandardItem(trade_data.get('date', 'N/A')), 
+            QStandardItem(trade_data['type']), 
+            QStandardItem(trade_data.get('lots', '0.00')),
+            QStandardItem(trade_data['price']), 
+            QStandardItem(trade_data['price']), # Init Current Price same as Entry Price
+            QStandardItem(trade_data['tp']), 
+            QStandardItem(trade_data['sl']), 
+            QStandardItem("0.00")
+        ]
         self.open_positions_model.appendRow(row)
 
-    @Slot(str, float)
-    def update_pl(self, ticket_str, profit):
+    @Slot(str, float, float)
+    def update_live_data(self, ticket_str, current_price, profit):
         ticket = int(ticket_str)
         for row in range(self.open_positions_model.rowCount()):
             if int(self.open_positions_model.item(row, 0).text()) == ticket:
+                self.open_positions_model.setItem(row, 5, QStandardItem(f"{current_price:.2f}"))
                 pl_item = QStandardItem(f"{profit:+.2f}")
                 pl_item.setForeground(QColor("lightgreen") if profit >= 0 else QColor("salmon"))
-                self.open_positions_model.setItem(row, 5, pl_item)
+                self.open_positions_model.setItem(row, 8, pl_item)
                 break
 
     @Slot(dict)
@@ -917,13 +944,13 @@ class MainWindow(QMainWindow):
                     color = QColor("#d32f2f") # Red
                     status_text = "LOSS"
 
-                # Update P/L Item (Index 5)
+                # Update P/L Item (Index 8)
                 pl_item = QStandardItem(f"{final_pl:+.2f}")
                 pl_item.setForeground(color)
                 pl_item.setTextAlignment(Qt.AlignCenter)
-                trade_row[5] = pl_item
+                trade_row[8] = pl_item
                 
-                # Create Status Item (Index 6) - Badge Style
+                # Create Status Item (Index 9) - Badge Style
                 status_item = QStandardItem(status_text)
                 status_item.setForeground(QColor("white"))
                 status_item.setBackground(color)
@@ -957,8 +984,11 @@ class MainWindow(QMainWindow):
         
         row = [
             QStandardItem(str(ticket)),
+            QStandardItem(data.get('date', 'N/A')),
             QStandardItem(data.get('type', "Unknown")),
+            QStandardItem(data.get('lots', '0.00')),
             QStandardItem(data.get('price', "0.00")),
+            QStandardItem(data.get('price', "0.00")), # Close price fallback
             QStandardItem(data.get('tp', "0.00")),
             QStandardItem(data.get('sl', "0.00")),
             pl_item,
@@ -974,7 +1004,7 @@ class MainWindow(QMainWindow):
         net_pl = 0.0
         
         for row in range(total_trades):
-            pl_item = self.closed_trades_model.item(row, 5)
+            pl_item = self.closed_trades_model.item(row, 8)
             if pl_item:
                 try:
                     pl_val = float(pl_item.text())
@@ -1085,8 +1115,8 @@ class MainWindow(QMainWindow):
                 if dialog.exec():
                     self.apply_scalper_settings(dialog.get_settings())
 
-        # Disable parameter inputs for ICT strategies and Gold Scalping New
-        params_enabled = not (is_scalper or is_ict_scalper or is_gold_new)
+        # Disable parameter inputs for Gold Scalper and Gold Scalping New
+        params_enabled = not (is_scalper or is_gold_new)
         # Re-enable for SMC but with specific meanings
         if is_smc: params_enabled = True
 
@@ -1106,7 +1136,7 @@ class MainWindow(QMainWindow):
             elif strategy == "Trend Following":
                 self.param1_label.setText("Signal MA Period:")
                 self.param2_label.setText("Trend MA Period:")
-            elif strategy in ("SMC", "ICT Trader"):
+            elif strategy in ("SMC", "ICT Trader", "ICT Gold Scalping"):
                 self.param1_label.setText("Risk (%):")
                 self.param2_label.setText("RR Ratio:")
                 self.param1_input.setText("1")
