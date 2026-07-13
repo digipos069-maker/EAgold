@@ -82,8 +82,12 @@ class ICTTrader(SMCTrader):
             return 0.62 <= position <= 0.79
 
 
-def run_ict_logic(worker, symbol, timeframe, risk_percent=1.0, rr_ratio=2.0):
+def run_ict_trader_logic(worker, symbol, timeframe):
+    params = getattr(worker, "strategy_params", {})
+    risk_percent = float(params.get("param1", 1.0))
+    rr_ratio = float(params.get("param2", 2.0))
     try:
         ICTTrader(worker, symbol, timeframe, risk_percent, rr_ratio).execute()
     except Exception as e:
         worker.signals.update_status.emit(f"ICT Error: {e}", "red")
+
