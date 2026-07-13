@@ -459,20 +459,8 @@ class SMCTrader:
         self.worker.signals.update_status.emit(f"{self.name}: {message}" if not message.startswith(self.name) else message, color)
 
 
-class ICTTrader(SMCTrader):
-    def __init__(self, worker, symbol, timeframe, risk_percent=1.0, rr_ratio=2.0):
-        super().__init__(worker, symbol, timeframe, risk_percent, rr_ratio, name="ICT")
-
-
 def run_smc_logic(worker, symbol, timeframe, risk_percent, rr_ratio):
     try:
         SMCTrader(worker, symbol, timeframe, risk_percent, rr_ratio).execute()
     except Exception as e:
         worker.signals.update_status.emit(f"SMC Error: {e}", "red")
-
-
-def run_ict_logic(worker, symbol, timeframe, risk_percent=1.0, rr_ratio=2.0):
-    try:
-        ICTTrader(worker, symbol, timeframe, risk_percent, rr_ratio).execute()
-    except Exception as e:
-        worker.signals.update_status.emit(f"ICT Error: {e}", "red")
